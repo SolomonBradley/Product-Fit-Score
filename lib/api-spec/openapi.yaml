@@ -3,13 +3,21 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: API specification for AI Product Fit Scoring Engine
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: auth
+    description: Authentication operations
+  - name: profile
+    description: User profile operations
+  - name: score
+    description: Product scoring operations
+  - name: history
+    description: Scoring history operations
 paths:
   /healthz:
     get:
@@ -24,6 +32,258 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /auth/signup:
+    post:
+      operationId: signup
+      tags: [auth]
+      summary: Create a new user account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignupBody"
+      responses:
+        "201":
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Email already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Login with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginBody"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Logout the current user
+      responses:
+        "200":
+          description: Logged out successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Get current authenticated user
+      responses:
+        "200":
+          description: Current user data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /profile:
+    get:
+      operationId: getProfile
+      tags: [profile]
+      summary: Get the current user's profile
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Profile not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    put:
+      operationId: updateProfile
+      tags: [profile]
+      summary: Create or update the user's profile (called after onboarding)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileBody"
+      responses:
+        "200":
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /score/analyze:
+    post:
+      operationId: analyzeProduct
+      tags: [score]
+      summary: Analyze a product URL and generate a personalized Fit Score
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalyzeProductBody"
+      responses:
+        "200":
+          description: Fit score result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FitScoreResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /score/boost:
+    post:
+      operationId: boostScore
+      tags: [score]
+      summary: Recalculate fit score with boosted feature weight
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BoostScoreBody"
+      responses:
+        "200":
+          description: Boosted fit score result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FitScoreResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /history:
+    get:
+      operationId: getHistory
+      tags: [history]
+      summary: Get recent product analysis history for current user
+      responses:
+        "200":
+          description: Analysis history list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HistoryItem"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /history/stats:
+    get:
+      operationId: getHistoryStats
+      tags: [history]
+      summary: Get aggregate stats from user's scoring history (avg score, categories, top brands)
+      responses:
+        "200":
+          description: Aggregate stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryStats"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +294,332 @@ components:
       required:
         - status
 
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+      required:
+        - success
+
+    SignupBody:
+      type: object
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+        name:
+          type: string
+      required:
+        - email
+        - password
+        - name
+
+    LoginBody:
+      type: object
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+      required:
+        - email
+        - password
+
+    AuthUser:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        name:
+          type: string
+        onboardingCompleted:
+          type: boolean
+      required:
+        - id
+        - email
+        - name
+        - onboardingCompleted
+
+    AuthResponse:
+      type: object
+      properties:
+        user:
+          $ref: "#/components/schemas/AuthUser"
+        token:
+          type: string
+      required:
+        - user
+        - token
+
+    ApparelPreferences:
+      type: object
+      properties:
+        topSize:
+          type: string
+        bottomSize:
+          type: string
+      required:
+        - topSize
+        - bottomSize
+
+    ArMeasurements:
+      type: object
+      properties:
+        chest:
+          type: ["number", "null"]
+        waist:
+          type: ["number", "null"]
+        hips:
+          type: ["number", "null"]
+        inseam:
+          type: ["number", "null"]
+      required:
+        - chest
+        - waist
+        - hips
+        - inseam
+
+    EmailIntegration:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        categories:
+          type: array
+          items:
+            type: string
+        brands:
+          type: array
+          items:
+            type: string
+      required:
+        - connected
+        - categories
+        - brands
+
+    UserProfile:
+      type: object
+      properties:
+        userId:
+          type: string
+        name:
+          type: string
+        gender:
+          type: string
+        height:
+          type: ["number", "null"]
+        weight:
+          type: ["number", "null"]
+        apparel:
+          $ref: "#/components/schemas/ApparelPreferences"
+        arMeasurements:
+          $ref: "#/components/schemas/ArMeasurements"
+        interests:
+          type: array
+          items:
+            type: string
+        emailIntegration:
+          $ref: "#/components/schemas/EmailIntegration"
+      required:
+        - userId
+        - name
+        - gender
+        - height
+        - weight
+        - apparel
+        - arMeasurements
+        - interests
+        - emailIntegration
+
+    UpdateProfileBody:
+      type: object
+      properties:
+        name:
+          type: string
+        gender:
+          type: string
+        height:
+          type: ["number", "null"]
+        weight:
+          type: ["number", "null"]
+        apparel:
+          $ref: "#/components/schemas/ApparelPreferences"
+        arMeasurements:
+          $ref: "#/components/schemas/ArMeasurements"
+        interests:
+          type: array
+          items:
+            type: string
+        emailIntegration:
+          $ref: "#/components/schemas/EmailIntegration"
+      required:
+        - name
+        - gender
+        - height
+        - weight
+        - apparel
+        - arMeasurements
+        - interests
+        - emailIntegration
+
+    AnalyzeProductBody:
+      type: object
+      properties:
+        url:
+          type: string
+        boostedFeatures:
+          type: array
+          items:
+            type: string
+      required:
+        - url
+
+    BoostScoreBody:
+      type: object
+      properties:
+        productUrl:
+          type: string
+        boostedFeature:
+          type: string
+      required:
+        - productUrl
+        - boostedFeature
+
+    FeatureScores:
+      type: object
+      properties:
+        camera:
+          type: ["number", "null"]
+        battery:
+          type: ["number", "null"]
+        performance:
+          type: ["number", "null"]
+        value:
+          type: ["number", "null"]
+        design:
+          type: ["number", "null"]
+        durability:
+          type: ["number", "null"]
+      required:
+        - camera
+        - battery
+        - performance
+        - value
+        - design
+        - durability
+
+    FitScoreResult:
+      type: object
+      properties:
+        productName:
+          type: string
+        productUrl:
+          type: string
+        category:
+          type: string
+        fitScore:
+          type: number
+        riskLevel:
+          type: string
+        strengths:
+          type: array
+          items:
+            type: string
+        weaknesses:
+          type: array
+          items:
+            type: string
+        riskFactors:
+          type: array
+          items:
+            type: string
+        whyItFitsYou:
+          type: array
+          items:
+            type: string
+        whyItMayNot:
+          type: array
+          items:
+            type: string
+        featureScores:
+          $ref: "#/components/schemas/FeatureScores"
+        boostableFeatures:
+          type: array
+          items:
+            type: string
+        analyzedAt:
+          type: string
+      required:
+        - productName
+        - productUrl
+        - category
+        - fitScore
+        - riskLevel
+        - strengths
+        - weaknesses
+        - riskFactors
+        - whyItFitsYou
+        - whyItMayNot
+        - featureScores
+        - boostableFeatures
+        - analyzedAt
+
+    HistoryItem:
+      type: object
+      properties:
+        id:
+          type: string
+        productName:
+          type: string
+        productUrl:
+          type: string
+        category:
+          type: string
+        fitScore:
+          type: number
+        riskLevel:
+          type: string
+        analyzedAt:
+          type: string
+      required:
+        - id
+        - productName
+        - productUrl
+        - category
+        - fitScore
+        - riskLevel
+        - analyzedAt
+
+    HistoryStats:
+      type: object
+      properties:
+        totalAnalyzed:
+          type: number
+        averageFitScore:
+          type: number
+        topCategory:
+          type: ["string", "null"]
+        categoryBreakdown:
+          type: object
+          additionalProperties:
+            type: number
+        recentHighScore:
+          type: ["number", "null"]
+      required:
+        - totalAnalyzed
+        - averageFitScore
+        - topCategory
+        - categoryBreakdown
+        - recentHighScore
