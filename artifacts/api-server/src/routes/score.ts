@@ -21,7 +21,6 @@ router.post("/score/analyze", requireAuth, async (req, res): Promise<void> => {
 
   const { url, boostedFeatures } = parsed.data;
 
-  // Get user profile for personalization
   const [profile] = await db
     .select()
     .from(profilesTable)
@@ -34,9 +33,8 @@ router.post("/score/analyze", requireAuth, async (req, res): Promise<void> => {
     gender: profile?.gender ?? "",
   };
 
-  const result = analyzeProductForUser(url, userContext, boostedFeatures ?? []);
+  const result = await analyzeProductForUser(url, userContext, boostedFeatures ?? []);
 
-  // Store in history
   await db.insert(analysesTable).values({
     userId: user.id,
     productName: result.productName,
@@ -72,9 +70,8 @@ router.post("/score/boost", requireAuth, async (req, res): Promise<void> => {
     gender: profile?.gender ?? "",
   };
 
-  const result = analyzeProductForUser(productUrl, userContext, [boostedFeature]);
+  const result = await analyzeProductForUser(productUrl, userContext, [boostedFeature]);
 
-  // Update the latest history entry for this URL
   const existing = await db
     .select()
     .from(analysesTable)

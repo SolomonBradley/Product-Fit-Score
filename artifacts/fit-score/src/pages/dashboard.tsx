@@ -72,7 +72,7 @@ export default function Dashboard() {
                   <p className="text-xs text-muted-foreground uppercase font-semibold flex items-center gap-1">
                     <Activity className="w-3 h-3" /> Total
                   </p>
-                  <p className="text-2xl font-mono">{statsLoading ? <Skeleton className="h-8 w-12" /> : stats?.totalAnalyzed || 0}</p>
+                  <div className="text-2xl font-mono">{statsLoading ? <Skeleton className="h-8 w-12" /> : stats?.totalAnalyzed || 0}</div>
                 </CardContent>
               </Card>
               <Card className="bg-muted/30 border-none shadow-none shrink-0 min-w-[120px]">
@@ -80,7 +80,7 @@ export default function Dashboard() {
                   <p className="text-xs text-muted-foreground uppercase font-semibold flex items-center gap-1">
                     <BarChart3 className="w-3 h-3" /> Avg Score
                   </p>
-                  <p className="text-2xl font-mono text-primary">{statsLoading ? <Skeleton className="h-8 w-12" /> : stats?.averageFitScore || 0}</p>
+                  <div className="text-2xl font-mono text-primary">{statsLoading ? <Skeleton className="h-8 w-12" /> : stats?.averageFitScore || 0}</div>
                 </CardContent>
               </Card>
             </div>

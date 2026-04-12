@@ -3,7 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useBoostScore } from "@workspace/api-client-react";
-import { Share, Zap, AlertTriangle, Check, Info } from "lucide-react";
+import { Share, Zap, AlertTriangle, Check, Info, ChevronRight } from "lucide-react";
 import type { FitScoreResult } from "@workspace/api-client-react/src/generated/api.schemas";
 import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
@@ -195,7 +195,3 @@ export function FitScoreCard({ result: initialResult }: { result: FitScoreResult
   );
 }
 
-// Need to create ChevronRight here since it was missing in the icon imports at top
-const ChevronRight = ({ className }: { className?: string }) => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinelinejoin="round" className={className}><path d="m9 18 6-6-6-6"/></svg>
-);
