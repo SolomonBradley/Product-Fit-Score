@@ -12,7 +12,18 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import { Loader2, ChevronRight, ChevronLeft, Search, ShoppingBag, CheckCircle2 } from "lucide-react";
 import { Layout } from "@/components/layout";
-import type { UpdateProfileBody } from "@workspace/api-client-react/src/generated/api.schemas";
+
+type UpdateProfileBody = {
+  name: string;
+  gender: string;
+  height: number | null;
+  weight: number | null;
+  apparel: any;
+  arMeasurements: any;
+  interests: string[];
+  emailIntegration: any;
+};
+
 import ArScanner from "@/components/ar-scanner";
 import { useQueryClient } from "@tanstack/react-query";
 import { getGetMeQueryKey } from "@workspace/api-client-react";

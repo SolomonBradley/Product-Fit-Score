@@ -58,7 +58,7 @@ export async function generateJSON<T>(prompt: string, retries = 1): Promise<T | 
         await new Promise(r => setTimeout(r, 1000)); // Short backoff
         continue;
       }
-      
+
       const errorMsg = isTimeout ? "Timeout (10 min)" : (err.message || String(err));
       logger.error({ error: errorMsg }, "[LLM] Analysis permanently failed or timed out.");
       return null;

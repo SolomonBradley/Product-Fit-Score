@@ -1,7 +1,7 @@
 import { Link } from "wouter";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
-import { LogOut } from "lucide-react";
+import { LogOut, UserCircle } from "lucide-react";
 import { useLogout } from "@workspace/api-client-react";
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -32,6 +32,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
               <span className="text-sm text-muted-foreground hidden md:inline-block">
                 {user.email}
               </span>
+              <Link href="/settings">
+                <Button variant="ghost" size="icon" title="Profile Settings">
+                  <UserCircle className="h-5 w-5" />
+                </Button>
+              </Link>
               <Button variant="ghost" size="icon" onClick={handleLogout} title="Log out">
                 <LogOut className="h-5 w-5" />
               </Button>

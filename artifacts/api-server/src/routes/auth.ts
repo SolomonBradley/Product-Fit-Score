@@ -7,6 +7,7 @@ import {
 } from "@workspace/api-zod";
 import {
   hashPassword,
+  verifyPassword,
   generateUserId,
   createSession,
   getUserFromToken,
@@ -50,12 +51,28 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   }
 
   const { email, password } = parsed.data;
-  const passwordHash = hashPassword(password);
 
   const [user] = await db.select().from(usersTable).where(eq(usersTable.email, email));
-  if (!user || user.passwordHash !== passwordHash) {
+  if (!user) {
     res.status(401).json({ error: "Invalid email or password" });
     return;
+  }
+
+  const { valid, needsMigration } = verifyPassword(password, user.passwordHash);
+
+  if (!valid) {
+    res.status(401).json({ error: "Invalid email or password" });
+    return;
+  }
+
+  // Auto-migrate SHA256 passwords to scrypt if needed
+  if (needsMigration) {
+    const newHash = hashPassword(password);
+    await db
+      .update(usersTable)
+      .set({ passwordHash: newHash })
+      .where(eq(usersTable.id, user.id))
+      .catch(() => {}); // Silent fail if update fails
   }
 
   const token = await createSession(user.id);

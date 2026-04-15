@@ -3,6 +3,8 @@ import { requireAuth } from "../lib/auth";
 import { db, profilesTable, usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../lib/logger";
+import { logger } from "../lib/logger";
+import { generateJSON } from "../lib/ollamaClient";
 import type { Request } from "express";
 import type { User } from "@workspace/db";
 
@@ -176,32 +178,34 @@ router.post("/gmail/disconnect-all", async (req, res): Promise<void> => {
 
 async function extractPurchaseSignals(accessToken: string): Promise<{ 
   categories: string[]; 
-  brands: { name: string, count: number, source: string }[]; 
-  recentOrders: { product: string, source: string, count: number }[] 
+  brands: Array<[string, number, string]>; // TUPLE FORMAT: [brandName, count, source]
+  recentOrders: Array<[number, string, string]> // TUPLE FORMAT: [count, productName, source]
 }> {
-  // ── NON-PURCHASE BLOCKLIST ──────────────────────────────────────────────
-  // These senders are NEVER physical product purchases. Skip them entirely.
-  // 🟡 IMPROVEMENT: Use domain-specific matching (@domain.com) instead of substring
-  const NON_PURCHASE_DOMAINS = [
-    // Education & Courses
-    "@udemy.com", "@coursera.com", "@edx.org", "@skillshare.com", "@linkedin.com", "@udacity.com",
-    "@pluralsight.com", "@classcentral.com", "@alison.com", "@simplilearn.com",
-    "@greatlearning.com", "@upgrad.com", "@scaler.com", "@codecademy.com", "@datacamp.com",
-    // Job / Career / Corporate
-    "@accenture.com", "@infosys.com", "@wipro.com", "@tcs.com", "@capgemini.com", "@cognizant.com",
-    "@hcl.com", "@naukri.com", "@indeed.com", "@glassdoor.com", "@monster.com", "@shine.com",
-    // Streaming / Music (not physical goods)
-    "@spotify.com", "@netflix.com", "@primevideo.com", "@hotstar.com", "@disney.com", "@jiocinema.com",
-    // Banking / Finance (not purchases)
-    "@hdfcbank.com", "@icicibank.com", "@sbicard.com", "@axisbank.com", "@phonepe.com", "@paytm.com",
-    "@googlepay.com", "@razorpay.com", "@cashfree.com",
-    // Generic tech (not retail)
-    "@google.com", "@microsoft.com", "@apple.com",
+  // ── STRICT EXHAUSTIVE ALLOWLIST ───────────────────────────────────────
+  // CRITICAL: We ONLY accept emails from these specific physical product brands.
+  const STRICT_RETAIL_ALLOWLIST = [
+    // Mega E-commerce
+    "amazon", "flipkart", "myntra", "ajio", "nykaa", "meesho", "tatacliq", "bewakoof", "westside",
+    "croma", "jiomart", "reliancedigital", "vijaysales", "shopee", "alibaba", "aliexpress",
+    // Fashion & Apparel
+    "zara", "hm", "uniqlo", "asos", "nike", "adidas", "puma", "gucci", "prada", "levi", "gap", 
+    "mango", "libas", "fabindia", "pantaloons", "zivame", "clovia", "decathlon", "underarmour",
+    // Beauty & Cosmetics
+    "purplle", "mamaearth", "mcaffeine", "minimalist", "plum", "lakme", "biotique", "sugar", 
+    "foxtale", "dotandkey", "maccosmetics", "sephora", "fenty", "estee", "lancome", "maybelline", "loreal",
+    // Electronics & Tech Hardware
+    "apple", "samsung", "sony", "dell", "lenovo", "hp", "asus", "oneplus", "boat", "noise", "jbl", 
+    "logitech", "anker", "realme", "xiaomi", "intel", "nvidia",
+    // Home & Furniture
+    "ikea", "pepperfry", "urbanladder", "wayfair", "homedepot", "pottery", "hometown", "zuari",
+    // Gifting & Specialty
+    "confettigifts", "fnp", "igp", "floweraura", "caratlane", "tanishq"
   ];
 
+
   try {
-    // Targeted search — only real Indian/global e-commerce order emails
-    const searchQuery = "(order confirmed OR order shipped OR order delivered OR purchase confirmed OR receipt) (amazon OR nykaa OR flipkart OR myntra OR ajio OR meesho OR tatacliq OR bewakoof OR westside OR zivame OR clovia OR puma OR adidas OR decathlon OR ikea OR pepperfry OR urbanladder OR croma OR reliance OR jiomart OR blinkit OR bigbasket OR swiggy OR zomato OR bookmyshow OR redbus OR irctc OR makemytrip OR goibibo)";
+    // Targeted search — ONLY genuine e-commerce purchase confirmation emails. Block gifts and subscriptions.
+    const searchQuery = '("order confirmed" OR "order shipped" OR "order delivered" OR "purchase" OR "receipt") -"gift card" -"eGift" -renewal -subscription';
     const searchResponse = await fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(searchQuery)}&maxResults=100`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -218,7 +222,7 @@ async function extractPurchaseSignals(accessToken: string): Promise<{
     logger.info({ foundCount, query: searchQuery }, "[Gmail Sync DEBUG] Search complete");
 
     if (!foundCount) {
-      logger.warn("[Gmail Sync DEBUG] No emails matched the purchase query. This is why extraction is empty.");
+      logger.warn("[Gmail Sync DEBUG] No purchase emails found. Extraction returned empty.");
       return { categories: [], brands: [], recentOrders: [] };
     }
 
@@ -226,8 +230,8 @@ async function extractPurchaseSignals(accessToken: string): Promise<{
     const categories = new Set<string>();
     const productCounts = new Map<string, { product: string, source: string, count: number }>();
 
-    // Analyze up to 25 messages
-    const messagesToAnalyze = (searchData.messages || []).slice(0, 25);
+    // Analyze up to 60 messages to dig past any remaining junk
+    const messagesToAnalyze = (searchData.messages || []).slice(0, 60);
     for (const msg of messagesToAnalyze) {
       try {
         // CRITICAL FIX: Use format=metadata to actually receive headers (Minimal format excludes them!)
@@ -252,56 +256,62 @@ async function extractPurchaseSignals(accessToken: string): Promise<{
         const from = headers.find((h) => h.name.toLowerCase() === "from")?.value ?? "";
         const subject = headers.find((h) => h.name.toLowerCase() === "subject")?.value ?? "";
 
-        // ── BLOCKLIST CHECK: Skip non-purchase senders immediately ──────────
+        // ── PRIMARY FILTER: Strict Allowlist Check ──────────────────────────────────
+        // CRITICAL: Reject emails UNLESS they strictly come from a major e-commerce brand
         const fromLowerCheck = from.toLowerCase();
-        const isBlocklisted = NON_PURCHASE_DOMAINS.some(domain => fromLowerCheck.includes(domain));
-        if (isBlocklisted) {
-          logger.info({ from }, "[Gmail Sync] SKIPPED — non-purchase sender (education/job/streaming)");
-          continue;
+        const isRetailer = STRICT_RETAIL_ALLOWLIST.some(domain => fromLowerCheck.includes(domain));
+        if (!isRetailer) {
+          logger.info({ from, reason: "not in strict hardcoded allowlist" }, "[Gmail Sync] REJECTED — sender is not a whitelisted e-commerce platform");
+          continue; // SKIP THIS EMAIL ENTIRELY
         }
 
-        logger.info({ from, subject }, "[Gmail Sync DEBUG] Analyzing email");
+        logger.info({ from, subject }, "[Gmail Sync DEBUG] Tracking approved email. Fetching full body...");
 
-        // Determine Source platform (expanded for Indian e-commerce)
-        let source = "Email";
-        const fromLower = from.toLowerCase();
-        if (fromLower.includes("amazon")) source = "Amazon";
-        else if (fromLower.includes("flipkart")) source = "Flipkart";
-        else if (fromLower.includes("nykaa")) source = "Nykaa";
-        else if (fromLower.includes("myntra")) source = "Myntra";
-        else if (fromLower.includes("meesho")) source = "Meesho";
-        else if (fromLower.includes("swiggy")) source = "Swiggy";
-        else if (fromLower.includes("zomato")) source = "Zomato";
-        else if (fromLower.includes("bigbasket") || fromLower.includes("blinkit") || fromLower.includes("zepto")) source = "Grocery";
-        else if (fromLower.includes("bookmyshow")) source = "BookMyShow";
-        else if (fromLower.includes("redbus") || fromLower.includes("irctc") || fromLower.includes("indigo")) source = "Travel";
-        else if (fromLower.includes("ajio")) source = "Ajio";
-        else if (fromLower.includes("tatacliq")) source = "TataCliq";
+        // FETCH FULL BODY NOW THAT IT IS WHITELISTED
+        const fullMsgResponse = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        let fullBodyText = "";
+        let rawHtml = "";
+        if (fullMsgResponse.ok) {
+           const fullData = await fullMsgResponse.json();
+           rawHtml = extractBody(fullData.payload);
+           fullBodyText = rawHtml.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '') // Remove CSS
+                                 .replace(/<[^>]*>?/gm, ' ') // Remove HTML tags
+                                 .replace(/&nbsp;/g, ' ')
+                                 .replace(/\s+/g, ' ') // Collapse whitespace
+                                 .trim();
+        }
+
+        // Determine Source platform - FIXED: Force match to the whitelisted brand
+        const domainMatch = STRICT_RETAIL_ALLOWLIST.find(domain => fromLowerCheck.includes(domain));
+        let source = capitalize(domainMatch || "Direct");
 
         // Extract brand from sender Display Name (e.g., "Nykaa" <orders@nykaa.com>)
-        let extractedBrand = "Unknown Brand";
+        let extractedBrand = "Unknown";
         const nameMatch = from.match(/^"?([^"<>@]+)"?\s*</);
         if (nameMatch && nameMatch[1].trim().length > 1) {
           extractedBrand = nameMatch[1].trim();
         } else {
           // fallback to domain
-          const domainMatch = from.match(/@([^>@\s.]+)\./i);
-          if (domainMatch) {
-             extractedBrand = capitalize(domainMatch[1].toLowerCase());
+          const domainMatchObj = from.match(/@([^>@\s.]+)\./i);
+          if (domainMatchObj) {
+             extractedBrand = capitalize(domainMatchObj[1].toLowerCase());
           }
         }
         
         const uselessPrefixes = ["support", "noreply", "no-reply", "notifications", "info", "mail", "help", "customer", "care", "service", "payment"];
         if (uselessPrefixes.some(p => extractedBrand.toLowerCase().startsWith(p))) {
-          extractedBrand = "Unknown Brand";
+          extractedBrand = source !== "Direct" ? source : "Unknown";
         }
 
-        // Fix: If brand is still unknown, fallback to the detected source platform
-        if (extractedBrand === "Unknown Brand" && source !== "Email") {
+        // If brand is still unknown, fallback to the detected source platform
+        if (extractedBrand === "Unknown" && source !== "Direct") {
           extractedBrand = source;
         }
 
-        if (extractedBrand !== "Unknown Brand") {
+        if (extractedBrand !== "Unknown") {
           const current = brandCounts.get(extractedBrand) || { count: 0, source };
           brandCounts.set(extractedBrand, { count: current.count + 1, source });
         }
@@ -314,88 +324,63 @@ async function extractPurchaseSignals(accessToken: string): Promise<{
         else if (isHome(searchDomain)) categories.add("home");
         else if (isBeauty(searchDomain)) categories.add("beauty");
         else if (isSports(searchDomain)) categories.add("sports");
-        else if (isTravel(searchDomain)) categories.add("travel");
-        // ── Extract Product from Snippet + Subject ──────────────────────────
-        // Snippets contain email body preview: "Your order of [Product] is confirmed"
-        const combinedText = `${subject} ${snippet}`;
+        
+        // ── Extract Product from Snippet + Subject + FULL BODY ──────────────────────────
+        let expectedCategoryDesc = "Item";
+        if (categories.has("beauty")) expectedCategoryDesc = "Beauty Product";
+        else if (categories.has("fashion")) expectedCategoryDesc = "Apparel";
+        else if (categories.has("electronics")) expectedCategoryDesc = "Electronics";
 
-        // Skip parsing logistics updates that falsely map as products
-        const isLogistics = ["courier", "in transit", "will be on the way", "ready to be", "out for delivery", "tracking", "docket", "awb", "status update"].some(kw => combinedText.toLowerCase().includes(kw));
-        if (isLogistics) {
-          continue; // skip trying to extract product name from courier updates
-        }
-        // Super-Aggressive E-Commerce specific extraction
-        const smartPatterns = [
-          // Amazon India
-          /Amazon\.in - Confirmation of your order:\s+([A-Za-z0-9\s\-&]+)/i,
-          /Amazon\.in order of\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|\s+was\s|\s+will\s|[,.!\n]|$)/i,
-          /Your Amazon\.in order #[-0-9]+ for\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|[,.!\n]|$)/i,
-          // Nykaa
-          /Your Nykaa order containing\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|[,.!\n]|$)/i,
-          /Your Nykaa Order for\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|[,.!\n]|$)/i,
-          /Nykaa order containing\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|[,.!\n]|$)/i,
-          // Flipkart & Myntra
-          /Your order for\s+([A-Za-z0-9\s\-&]+?)\s+from Flipkart/i,
-          /Flipkart order for\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|[,.!\n]|$)/i,
-          /Myntra order for\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|[,.!\n]|$)/i,
-          // Common Indian Purchase Keywords
-          /booking id\s*[-:A-Z0-9]+\s*for\s+([A-Za-z0-9\s\-&]+)/i,
-          /transaction\s+for\s+([A-Za-z0-9\s\-&]+)/i,
-          /order\s+for\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|\s+was\s|\s+will\s|[,.!\n]|$)/i,
-          /order\s+of\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|\s+was\s|\s+will\s|[,.!\n]|$)/i,
-          /purchased\s+([A-Za-z0-9\s\-&]+?)(?:\s+has\s|\s+is\s|\s+was\s|\s+will\s|[,.!\n]|$)/i,
-          /item:\s*([A-Za-z0-9][A-Za-z0-9\s\-&]+)/i,
-          /product:\s*([A-Za-z0-9][A-Za-z0-9\s\-&]+)/i,
-          /ticket for\s+([A-Za-z0-9][A-Za-z0-9\s\-&]+)/i,
-          /booking for\s+([A-Za-z0-9][A-Za-z0-9\s\-&]+)/i,
-          /confirmed:\s+([A-Za-z0-9\s\-&]+)/i
-        ];
-
+        const combinedText = `${subject} ${snippet} ${fullBodyText}`.substring(0, 3000); // Guard rails
+        
         let extractedProduct: string | null = null;
-        for (const pattern of smartPatterns) {
-          const match = combinedText.match(pattern);
-          if (match?.[1] && match[1].trim().length > 3) {
-            // Drop it if it accidentally matched a garbage sentence
-            const badWords = ["successfully", "placed", "our team", "doing", "delivery", "payment"];
-            if (!badWords.some(bw => match[1].toLowerCase().includes(bw))) {
-               // RIGIDITY FIX: Strip common filler and keep it to 2 words max
-               const clean = match[1].replace(/[^a-zA-Z0-9\s]/g, "").trim();
-               const words = clean.split(/\s+/);
-               extractedProduct = words.slice(0, 2).join(" ");
-               break;
-            }
-          }
+        
+        // --- HYBRID AI PARSING ---
+        // Since we only have ~5 whitelisted emails per sync, we can safely call AI for pinpoint accuracy!
+        try {
+           logger.info({ brand: extractedBrand }, "[Gmail Sync DEBUG] Calling AI to extract product name...");
+           const prompt = `You are a precision retail parser. Extract the PURE physical product name from this e-commerce email.
+Brand: ${extractedBrand}
+Expected Category: ${expectedCategoryDesc}
+
+Email Text:
+${combinedText.substring(0, 1200)}
+
+Instructions:
+1. Return ONLY the specific product name (e.g. "Lakme Matte Lipstick", "Apple iPhone 15").
+2. No prices, no order IDs, no dates.
+3. If no specific product is clear, return null.
+
+Return strictly JSON: { "productName": "string or null" }`;
+
+           const result = await generateJSON<{ productName: string | null }>(prompt);
+           if (result?.productName && result.productName.length > 2) {
+              extractedProduct = result.productName.trim();
+              logger.info({ extractedProduct }, "[Gmail Sync DEBUG] AI identified product");
+           }
+        } catch(e) {
+           logger.warn("[Gmail Sync DEBUG] AI extraction failed, using fallback.");
         }
 
-        // Fallback: Default to [Brand] [Category] so the LLM still gets perfect context
         if (!extractedProduct) {
-          // Attempt a "Smart Snippet" extraction by looking for common nouns after purchase verbs
-          const snippetLower = snippet.toLowerCase();
-          const purchaseVerbs = ["ordered", "purchased", "bought", "delivered", "shipping", "item", "product"];
-          for (const verb of purchaseVerbs) {
-            const verbIndex = snippetLower.indexOf(verb);
-            if (verbIndex !== -1) {
-              const afterVerb = snippet.substring(verbIndex + verb.length).trim();
-              const words = afterVerb.split(" ").slice(0, 4); // Take next 4 words
-              if (words.length > 0) {
-                 extractedProduct = words.join(" ");
-                 break;
+           // Fallback 1: JSON-LD (Standard Schema)
+           if (rawHtml) {
+              const ldMatch = rawHtml.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/i);
+              if (ldMatch) {
+                 try {
+                    const parsed = JSON.parse(ldMatch[1]);
+                    const name = parsed.name || (parsed.itemOffered && parsed.itemOffered.name);
+                    if (typeof name === 'string') extractedProduct = name.substring(0, 50);
+                 } catch(e) {}
               }
-            }
-          }
+           }
         }
 
         if (!extractedProduct) {
-          let catDesc = "Item";
-          if (combinedText.toLowerCase().includes("lipstick") || categories.has("beauty")) catDesc = "Beauty Product";
-          else if (combinedText.toLowerCase().includes("shirt") || categories.has("fashion")) catDesc = "Apparel";
-          else if (combinedText.toLowerCase().includes("phone") || categories.has("electronics")) catDesc = "Electronics";
-          else if (categories.has("food")) catDesc = "Food";
-          else if (categories.has("travel") || combinedText.toLowerCase().includes("train") || combinedText.toLowerCase().includes("ticket")) catDesc = "Travel Booking";
-          
-          const finalBrand = extractedBrand !== "Unknown Brand" ? extractedBrand : (source !== "Email" ? source : "Web");
-          extractedProduct = `${finalBrand} ${catDesc}`;
+           const finalBrand = extractedBrand !== "Unknown" ? extractedBrand : source;
+           extractedProduct = `${finalBrand} ${expectedCategoryDesc}`;
         }
+
 
         
         extractedProduct = extractedProduct.substring(0, 45).trim();
@@ -410,28 +395,53 @@ async function extractPurchaseSignals(accessToken: string): Promise<{
       }
     }
 
+    // Convert to tuple formats (ISSUE #7 FIX)
+    let finalCategories = Array.from(categories).slice(0, 6);
+    let finalBrands = Array.from(brandCounts.entries())
+      .map(([name, data]) => [name, data.count, data.source] as [string, number, string])
+      .sort((a, b) => b[1] - a[1]) // Sort by count
+      .slice(0, 10);
+    let finalOrders = Array.from(productCounts.values())
+      .map(o => [o.count, o.product, o.source] as [number, string, string])
+      .sort((a, b) => b[0] - a[0]) // Sort by count
+      .slice(0, 15);
+
     const result = {
-      categories: Array.from(categories).slice(0, 6),
-      brands: Array.from(brandCounts.entries())
-        .map(([name, data]) => ({ name, ...data }))
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 10),
-      recentOrders: Array.from(productCounts.values())
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 15),
+      categories: finalCategories,
+      brands: finalBrands,
+      recentOrders: finalOrders,
     };
 
     logger.info({
       orders_count: result.recentOrders.length,
-      top_orders: result.recentOrders.slice(0, 15).map(o => `(${o.count}, ${o.source}, ${o.product})`),
-      brands: result.brands.map(b => b.name)
-    }, "[Gmail Sync DEBUG] Intelligence feasting complete!");
+      top_orders: result.recentOrders.slice(0, 15).map(o => `(${o[0]}, ${o[2]}, ${o[1]})`),
+      brands: result.brands.map(b => b[0])
+    }, "[Gmail Sync DEBUG] Purchase extraction complete!");
 
     return result;
   } catch (err) {
     logger.error({ err }, "[Gmail Sync] Fatal error during extraction");
     return { categories: [], brands: [], recentOrders: [] };
   }
+}
+
+export default router;
+
+function extractBody(payload: any): string {
+  if (payload?.body?.data) {
+    try {
+      return Buffer.from(payload.body.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8');
+    } catch {
+      return "";
+    }
+  }
+  let body = "";
+  if (payload?.parts) {
+    for (const part of payload.parts) {
+      body += " " + extractBody(part);
+    }
+  }
+  return body;
 }
 
 function capitalize(s: string): string {
@@ -453,5 +463,3 @@ function isHome(d: string) { return HOME_BRANDS.some(b => d.includes(b)); }
 function isBeauty(d: string) { return BEAUTY_BRANDS.some(b => d.includes(b)); }
 function isSports(d: string) { return SPORTS_BRANDS.some(b => d.includes(b)); }
 function isTravel(d: string) { return TRAVEL_BRANDS.some(b => d.includes(b)); }
-
-export default router;

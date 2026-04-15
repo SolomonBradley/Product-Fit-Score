@@ -10,11 +10,15 @@ import type { User } from "@workspace/db";
 
 type AuthRequest = Request & { user: User };
 
+// ISSUE #7 FIX: Tuple format for email integration data
 interface EmailIntegration {
   connected?: boolean;
   categories?: string[];
-  brands?: Array<{ name: string; count: number; source: string }>;
-  recentOrders?: Array<{ product: string; source: string; count: number }>;
+  brands?: Array<[string, number, string]>; // [brandName, count, source]
+  recentOrders?: Array<[number, string, string]>; // [count, productName, source]
+  lastSyncedAt?: string;
+  accessToken?: string;
+  refreshToken?: string | null;
 }
 
 const router: IRouter = Router();
@@ -37,15 +41,29 @@ router.post("/score/analyze", requireAuth, async (req, res): Promise<void> => {
   const userContext: UserContext = {
     interests: (profile?.interests as string[]) ?? [],
     emailCategories: ((profile?.emailIntegration as EmailIntegration)?.categories ?? []) as string[],
-    emailBrands: ((profile?.emailIntegration as EmailIntegration)?.brands ?? []) as Array<{ name: string; count: number; source: string }>,
+    emailBrands: ((profile?.emailIntegration as EmailIntegration)?.brands ?? []) as Array<[string, number, string] | { name: string; count: number; source: string }>,
     gender: profile?.gender ?? "",
-    recentOrders: ((profile?.emailIntegration as EmailIntegration)?.recentOrders ?? []) as Array<{ product: string; source: string; count: number }>,
+    recentOrders: ((profile?.emailIntegration as EmailIntegration)?.recentOrders ?? []) as Array<[number, string, string] | { product: string; source: string; count: number }>,
+    
+    // ✅ NEW: Pass AR measurements and body data for smart apparel fitting
+    arMeasurements: profile?.arMeasurements as { chest: number | null; waist: number | null; hips: number | null; inseam: number | null } | undefined,
+    height: profile?.height ?? undefined,
+    weight: profile?.weight ?? undefined,
+    apparelPreferences: profile?.apparel as { topSize: string; bottomSize: string } | undefined,
   };
 
   logger.info({ 
     orders_count: userContext.recentOrders.length,
-    top_orders: userContext.recentOrders.slice(0, 10).map((o: { count: number; product: string; source: string }) => `(${o.count}x, ${o.product}, ${o.source})`),
-    brands: userContext.emailBrands.map((b: { name: string; count: number; source: string }) => `(${b.count}x, ${b.name}, ${b.source})`).slice(0, 5)
+    top_orders: userContext.recentOrders.slice(0, 10).map((o: any) => {
+      // Handle both tuple [count, name, source] and object formats
+      if (Array.isArray(o)) return `(${o[0]}x, ${o[1]}, ${o[2]})`;
+      return `(${o.count}x, ${o.product}, ${o.source})`;
+    }),
+    brands: userContext.emailBrands.slice(0, 5).map((b: any) => {
+      // Handle tuple [name, count, source]
+      if (Array.isArray(b)) return `${b[0]} (${b[1]} orders via ${b[2]})`;
+      return `${b.name} (${b.count} orders via ${b.source})`;
+    })
   }, "[System] Feasting on user Gmail data for intelligence...");
 
   try {

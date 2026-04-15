@@ -56,6 +56,12 @@ router.put("/profile", requireAuth, async (req, res): Promise<void> => {
 
   const data = parsed.data;
 
+  // Fetch existing profile to protect system-managed fields (like emailIntegration) from being overwritten by the frontend
+  const [existingProfile] = await db
+    .select()
+    .from(profilesTable)
+    .where(eq(profilesTable.userId, user.id));
+
   const upsertData = {
     userId: user.id,
     name: data.name,
@@ -65,15 +71,16 @@ router.put("/profile", requireAuth, async (req, res): Promise<void> => {
     apparel: data.apparel as Record<string, unknown>,
     arMeasurements: data.arMeasurements as Record<string, unknown>,
     interests: data.interests as string[],
+    // STRICT PRESERVATION: Do not let the frontend wipe out Gmail sync data
+    emailIntegration: existingProfile 
+        ? existingProfile.emailIntegration 
+        : { connected: false, categories: [], brands: [] },
     updatedAt: new Date(),
   };
 
   const [profile] = await db
     .insert(profilesTable)
-    .values({
-      ...upsertData,
-      emailIntegration: { connected: false, categories: [], brands: [], recentOrders: [] },
-    })
+    .values(upsertData)
     .onConflictDoUpdate({
       target: profilesTable.userId,
       set: {
@@ -84,9 +91,8 @@ router.put("/profile", requireAuth, async (req, res): Promise<void> => {
         apparel: upsertData.apparel,
         arMeasurements: upsertData.arMeasurements,
         interests: upsertData.interests,
+        // CRITICAL: Do NOT overwrite emailIntegration on conflict, preserve the DB version
         updatedAt: upsertData.updatedAt,
-        // 💀 CRITICAL FIX: Never touch emailIntegration here — it's only updated by Gmail callback
-        // Omit emailIntegration from the conflict update so existing value is preserved
       },
     })
     .returning();
