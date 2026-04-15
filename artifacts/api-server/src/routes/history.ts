@@ -19,7 +19,6 @@ router.get("/history", requireAuth, async (req, res): Promise<void> => {
       productUrl: analysesTable.productUrl,
       category: analysesTable.category,
       fitScore: analysesTable.fitScore,
-      riskLevel: analysesTable.riskLevel,
       analyzedAt: analysesTable.analyzedAt,
     })
     .from(analysesTable)
@@ -34,7 +33,6 @@ router.get("/history", requireAuth, async (req, res): Promise<void> => {
       productUrl: r.productUrl,
       category: r.category,
       fitScore: r.fitScore,
-      riskLevel: r.riskLevel,
       analyzedAt: r.analyzedAt.toISOString(),
     }))
   );
@@ -43,8 +41,12 @@ router.get("/history", requireAuth, async (req, res): Promise<void> => {
 router.get("/history/stats", requireAuth, async (req, res): Promise<void> => {
   const user = (req as AuthRequest).user;
 
+  // 🟢 IMPROVEMENT: Select only needed columns, not full JSONB result blob
   const rows = await db
-    .select()
+    .select({
+      fitScore: analysesTable.fitScore,
+      category: analysesTable.category,
+    })
     .from(analysesTable)
     .where(eq(analysesTable.userId, user.id));
 
@@ -54,14 +56,14 @@ router.get("/history/stats", requireAuth, async (req, res): Promise<void> => {
       averageFitScore: 0,
       topCategory: null,
       categoryBreakdown: {},
-      recentHighScore: null,
+      highScore: null,
     });
     return;
   }
 
   const totalAnalyzed = rows.length;
   const averageFitScore = Math.round(rows.reduce((sum, r) => sum + r.fitScore, 0) / totalAnalyzed);
-  const recentHighScore = Math.max(...rows.map((r) => r.fitScore));
+  const highScore = Math.max(...rows.map((r) => r.fitScore));
 
   // Category breakdown
   const categoryBreakdown: Record<string, number> = {};
@@ -75,7 +77,7 @@ router.get("/history/stats", requireAuth, async (req, res): Promise<void> => {
     averageFitScore,
     topCategory,
     categoryBreakdown,
-    recentHighScore,
+    highScore,
   });
 });
 

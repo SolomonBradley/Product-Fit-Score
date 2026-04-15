@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Camera, CameraOff, ScanFace, CheckCircle2, AlertCircle } from "lucide-react";
+import { Camera, CameraOff, ScanFace, CheckCircle2, AlertCircle, RefreshCcw } from "lucide-react";
+import { PoseLandmarker, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
 
 interface ArMeasurements {
   chest: number | null;
@@ -18,56 +19,126 @@ interface ArScannerProps {
   existingMeasurements: ArMeasurements;
 }
 
-function estimateMeasurements(height: number | null, weight: number | null, gender: string): ArMeasurements {
-  // Use anthropometric formulas to estimate body measurements
-  const h = height ?? 170;
-  const w = weight ?? 70;
-  const isMale = gender === "male";
-
-  // BMI-based body shape estimation
-  const bmi = w / ((h / 100) ** 2);
-  const bodyFatFactor = isMale ? 0.85 : 1.0;
-
-  // Chest estimate: roughly correlated with height and weight
-  const chest = Math.round((h * 0.18 + w * 0.25 + (bmi > 25 ? 2 : 0)) * bodyFatFactor);
-  // Waist: correlated with weight and BMI
-  const waist = Math.round(h * 0.13 + w * 0.22 + (bmi > 25 ? 3 : 0));
-  // Hips: slightly wider than chest for female, similar for male
-  const hips = Math.round(isMale ? chest * 1.02 : chest * 1.08);
-  // Inseam: ~47% of height
-  const inseam = Math.round(h * 0.47 / 2.54); // convert to inches
-
-  return {
-    chest: Math.min(Math.max(chest, 28), 60),
-    waist: Math.min(Math.max(waist, 22), 52),
-    hips: Math.min(Math.max(hips, 28), 60),
-    inseam: Math.min(Math.max(inseam, 24), 40),
-  };
-}
-
-export default function ArScanner({ height, weight, gender, onMeasurementsReady, existingMeasurements }: ArScannerProps) {
+export default function ArScanner({ height, onMeasurementsReady, existingMeasurements }: ArScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const [cameraState, setCameraState] = useState<"idle" | "requesting" | "active" | "scanning" | "done" | "error">("idle");
-  const [scanProgress, setScanProgress] = useState(0);
-  const [scanPhase, setScanPhase] = useState("");
+  
+  const [cameraState, setCameraState] = useState<"idle" | "requesting" | "shirt" | "pants" | "done" | "error">("idle");
+  const [scanMessage, setScanMessage] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [measurements, setMeasurements] = useState<ArMeasurements>(existingMeasurements);
+  const [isModelLoading, setIsModelLoading] = useState(false);
 
+  // MediaPipe refs
+  const landmarkerRef = useRef<PoseLandmarker | null>(null);
+  const requestRef = useRef<number>(0);
+  const currentLandmarksRef = useRef<any>(null); // Store latest landmarks
+
+  // Constants
+  const USER_HEIGHT_CM = height ?? 170; 
+  const CM_TO_INCHES = 0.393701;
+
+  // Cleanup
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
+    if (requestRef.current) {
+      cancelAnimationFrame(requestRef.current);
+    }
   }, []);
 
   useEffect(() => {
-    return () => stopCamera();
+    return () => {
+      stopCamera();
+      if (landmarkerRef.current) {
+        landmarkerRef.current.close();
+      }
+    };
   }, [stopCamera]);
+
+  // Render loop for skeleton
+  const predictWebcam = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const landmarker = landmarkerRef.current;
+
+    if (!video || !canvas || !landmarker || video.readyState < 2) {
+      if (cameraState === "shirt" || cameraState === "pants") {
+        requestRef.current = requestAnimationFrame(predictWebcam);
+      }
+      return;
+    }
+
+    // Set canvas size
+    const videoWidth = video.videoWidth;
+    const videoHeight = video.videoHeight;
+    canvas.width = videoWidth;
+    canvas.height = videoHeight;
+
+    let startTimeMs = performance.now();
+    try {
+      if (video.currentTime > 0) {
+        const results = landmarker.detectForVideo(video, startTimeMs);
+        currentLandmarksRef.current = results.landmarks?.[0] || null;
+
+        const ctx = canvas.getContext("2d");
+        if (ctx && results.landmarks) {
+          ctx.save();
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          const drawingUtils = new DrawingUtils(ctx);
+          for (const landmark of results.landmarks) {
+            drawingUtils.drawLandmarks(landmark, { radius: 3, color: "#6366f1" });
+            drawingUtils.drawConnectors(landmark, PoseLandmarker.POSE_CONNECTIONS, { color: "#818cf8", lineWidth: 2 });
+          }
+          ctx.restore();
+        }
+      }
+    } catch (e) {
+      console.warn("Pose estimation skipped frame.");
+    }
+    
+    if (cameraState === "shirt" || cameraState === "pants") {
+      requestRef.current = requestAnimationFrame(predictWebcam);
+    }
+  }, [cameraState]);
+
+  const initMediaPipe = async () => {
+    if (landmarkerRef.current) return true;
+    try {
+      setIsModelLoading(true);
+      setScanMessage("Loading AI tracking models...");
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+      );
+      landmarkerRef.current = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numPoses: 1
+      });
+      return true;
+    } catch (err) {
+      console.error(err);
+      setErrorMsg("Failed to load AI measurement models.");
+      setCameraState("error");
+      return false;
+    } finally {
+      setIsModelLoading(false);
+    }
+  };
 
   const startCamera = async () => {
     setCameraState("requesting");
     setErrorMsg("");
+    
+    const modelLoaded = await initMediaPipe();
+    if (!modelLoaded) return;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } },
@@ -76,68 +147,113 @@ export default function ArScanner({ height, weight, gender, onMeasurementsReady,
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current?.play();
+          setCameraState("shirt");
+          setScanMessage("Stand fully in frame.");
+          requestRef.current = requestAnimationFrame(predictWebcam);
+        };
       }
-      setCameraState("active");
     } catch (err: unknown) {
       const error = err as Error;
       stopCamera();
       setCameraState("error");
       if (error.name === "NotAllowedError") {
-        setErrorMsg("Camera access was denied. Please allow camera permission and try again.");
-      } else if (error.name === "NotFoundError") {
-        setErrorMsg("No camera detected on this device.");
+        setErrorMsg("Camera access denied.");
       } else {
-        setErrorMsg(`Camera error: ${error.message}`);
+        setErrorMsg("No camera detected.");
       }
     }
   };
 
-  const runScan = async () => {
-    setCameraState("scanning");
-    setScanProgress(0);
+  // Helper to calculate distance
+  const calcDist = (lm1: any, lm2: any) => {
+    return Math.sqrt(Math.pow(lm1.x - lm2.x, 2) + Math.pow(lm1.y - lm2.y, 2));
+  };
 
-    const phases = [
-      { label: "Initializing body detection...", duration: 800 },
-      { label: "Mapping skeletal points...", duration: 1000 },
-      { label: "Calculating proportions...", duration: 1200 },
-      { label: "Estimating measurements...", duration: 800 },
-      { label: "Calibrating with profile data...", duration: 600 },
-    ];
-
-    let progress = 0;
-    for (const phase of phases) {
-      setScanPhase(phase.label);
-      const steps = 10;
-      const increment = 20 / steps;
-      for (let i = 0; i < steps; i++) {
-        await new Promise((r) => setTimeout(r, phase.duration / steps));
-        progress += increment;
-        setScanProgress(Math.min(Math.round(progress), 99));
-      }
+  const handleCaptureShirt = () => {
+    const lms = currentLandmarksRef.current;
+    if (!lms || lms.length === 0) {
+      setScanMessage("No body detected! Stand clearly in frame.");
+      return;
     }
 
-    // Compute measurements from profile data
-    const result = estimateMeasurements(height, weight, gender);
-    setMeasurements(result);
-    setScanProgress(100);
-    setScanPhase("Scan complete!");
+    // Nodes: 0: nose, 31: right ankle, 11: left shoulder, 12: right shoulder
+    const head = lms[0];
+    const ankle = lms[31];
+    const leftShoulder = lms[11];
+    const rightShoulder = lms[12];
 
-    // Stop the camera after scan
+    const bodyPixelHeight = calcDist(head, ankle) || 1; // Prevent div by 0
+    // Pixels per cm based on user height
+    const pxPerCm = bodyPixelHeight / USER_HEIGHT_CM; 
+
+    // Chest approx: (shoulder width) * 2 or slightly curved around
+    // 1D distance * approx circumference factor (3.14 / 1.5)
+    const shoulderWidthPx = calcDist(leftShoulder, rightShoulder);
+    const shoulderWidthCm = shoulderWidthPx / pxPerCm;
+    
+    let chestCircumferenceInches = Math.round((shoulderWidthCm * 2.2) * CM_TO_INCHES);
+    // Sanity check boundings
+    chestCircumferenceInches = Math.min(Math.max(chestCircumferenceInches, 30), 55);
+
+    setMeasurements(prev => ({ ...prev, chest: chestCircumferenceInches }));
+    setCameraState("pants");
+    setScanMessage("Great! Now make sure your full legs are in frame.");
+  };
+
+  const handleCapturePants = () => {
+    const lms = currentLandmarksRef.current;
+    if (!lms || lms.length === 0) {
+      setScanMessage("No body detected! Stand clearly in frame.");
+      return;
+    }
+
+    // Nodes: 0: nose, 31: right ankle, 23: left hip, 24: right hip
+    const head = lms[0];
+    const ankle = lms[31];
+    const leftHip = lms[23];
+    const rightHip = lms[24];
+
+    const bodyPixelHeight = calcDist(head, ankle) || 1;
+    const pxPerCm = bodyPixelHeight / USER_HEIGHT_CM; 
+
+    // Waist approx (using hips as proxy for waist/hip circumference)
+    const hipWidthPx = calcDist(leftHip, rightHip);
+    const hipWidthCm = hipWidthPx / pxPerCm;
+    let waistCircInches = Math.round((hipWidthCm * 2.3) * CM_TO_INCHES);
+    let hipsCircInches = Math.round((hipWidthCm * 2.5) * CM_TO_INCHES);
+
+    // Inseam approx (hip to ankle straight line)
+    const inseamPx = calcDist(leftHip, lms[27]); // 27 = left ankle
+    const inseamCm = inseamPx / pxPerCm;
+    let inseamInches = Math.round(inseamCm * CM_TO_INCHES);
+
+    // Bounds check
+    waistCircInches = Math.min(Math.max(waistCircInches, 24), 50);
+    hipsCircInches = Math.min(Math.max(hipsCircInches, 30), 55);
+    inseamInches = Math.min(Math.max(inseamInches, 24), 40);
+
+    const finalMeasurements = {
+      ...measurements,
+      waist: waistCircInches,
+      hips: hipsCircInches,
+      inseam: inseamInches
+    };
+
+    setMeasurements(finalMeasurements);
     stopCamera();
     setCameraState("done");
-    onMeasurementsReady(result);
+    onMeasurementsReady(finalMeasurements);
   };
 
   const reset = () => {
     stopCamera();
     setCameraState("idle");
-    setScanProgress(0);
-    setScanPhase("");
+    setMeasurements({ chest: null, waist: null, hips: null, inseam: null });
   };
 
   if (existingMeasurements.chest && cameraState === "idle") {
-    // Already have measurements
     return (
       <div className="space-y-4 text-center">
         <div className="mx-auto w-16 h-16 rounded-full bg-green-500/10 flex items-center justify-center">
@@ -160,8 +276,8 @@ export default function ArScanner({ height, weight, gender, onMeasurementsReady,
         </div>
         <p className="font-semibold">Scan complete</p>
         <MeasurementGrid measurements={measurements} />
-        <Button variant="outline" size="sm" onClick={reset} className="text-xs">
-          Re-scan
+        <Button variant="outline" size="sm" onClick={reset} className="text-xs mt-4">
+          <RefreshCcw className="w-4 h-4 mr-2" /> Start Over
         </Button>
       </div>
     );
@@ -181,101 +297,73 @@ export default function ArScanner({ height, weight, gender, onMeasurementsReady,
 
   return (
     <div className="space-y-4">
-      {/* Camera viewfinder */}
+      {/* Video Viewfinder Container */}
       <div className="relative w-full aspect-[4/3] bg-black rounded-xl overflow-hidden border border-border/50">
         <video
           ref={videoRef}
-          className="w-full h-full object-cover"
+          className="absolute inset-0 w-full h-full object-cover"
           muted
           playsInline
         />
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+        />
 
-        {/* Idle overlay */}
+        {/* UI Overlays based on state */}
         {cameraState === "idle" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-muted/80 backdrop-blur-sm gap-3">
             <ScanFace className="w-12 h-12 text-primary" />
             <p className="text-sm text-center text-muted-foreground px-6">
-              Point your camera at your best-fitting clothes to measure
+              Use actual AR Body Tracking to extract your unique measurements.
             </p>
+            <Button onClick={startCamera} className="mt-2" disabled={isModelLoading}>
+              {isModelLoading ? "Loading AI..." : "Open Camera"}
+            </Button>
           </div>
         )}
 
-        {/* Requesting overlay */}
         {cameraState === "requesting" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-            <p className="text-white text-sm">Requesting camera access...</p>
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 gap-3">
+            <ScanFace className="w-10 h-10 text-white animate-pulse" />
+            <p className="text-white text-sm">{scanMessage || "Requesting camera access..."}</p>
           </div>
         )}
 
-        {/* Scanning overlay */}
-        {cameraState === "scanning" && (
-          <div className="absolute inset-0">
-            {/* Scan line animation */}
-            <div
-              className="absolute left-0 right-0 h-0.5 bg-primary/80 shadow-lg shadow-primary/50"
-              style={{
-                top: `${scanProgress}%`,
-                transition: "top 0.3s ease-out",
-                boxShadow: "0 0 12px 2px rgba(99,102,241,0.6)",
-              }}
-            />
-            {/* Corner markers */}
-            <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-primary rounded-tl" />
-            <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-primary rounded-tr" />
-            <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-primary rounded-bl" />
-            <div className="absolute bottom-4 right-4 w-6 h-6 border-b-2 border-r-2 border-primary rounded-br" />
-            {/* Grid overlay */}
-            <div className="absolute inset-0 opacity-10"
-              style={{
-                backgroundImage: "linear-gradient(rgba(99,102,241,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(99,102,241,0.5) 1px, transparent 1px)",
-                backgroundSize: "40px 40px",
-              }}
-            />
-          </div>
-        )}
-
-        {/* Active overlay — show guide */}
-        {cameraState === "active" && (
-          <div className="absolute inset-0 pointer-events-none">
-            <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-primary/70 rounded-tl" />
-            <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-primary/70 rounded-tr" />
-            <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-primary/70 rounded-bl" />
-            <div className="absolute bottom-4 right-4 w-6 h-6 border-b-2 border-r-2 border-primary/70 rounded-br" />
-            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-3">
-              <p className="text-white text-xs text-center">Lay clothes flat or hold up to camera</p>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Scan progress bar */}
-      {cameraState === "scanning" && (
-        <div className="space-y-1">
-          <Progress value={scanProgress} className="h-1.5" />
-          <p className="text-xs text-muted-foreground text-center animate-pulse">{scanPhase}</p>
-        </div>
-      )}
-
-      {/* Actions */}
-      <div className="flex gap-2">
-        {cameraState === "idle" && (
-          <Button onClick={startCamera} className="flex-1">
-            <Camera className="w-4 h-4 mr-2" />
-            Open Camera
-          </Button>
-        )}
-        {cameraState === "active" && (
+        {/* Visual guide overlay for Shirts/Pants */}
+        {(cameraState === "shirt" || cameraState === "pants") && (
           <>
-            <Button onClick={runScan} className="flex-1">
-              <ScanFace className="w-4 h-4 mr-2" />
-              Start Scan
-            </Button>
-            <Button variant="outline" onClick={reset}>
-              <CameraOff className="w-4 h-4" />
-            </Button>
+            <div className="absolute top-4 left-0 right-0 z-10 flex justify-center">
+              <div className="bg-black/60 text-white text-xs px-4 py-1.5 rounded-full backdrop-blur-md border border-white/10 font-medium">
+                {cameraState === "shirt" ? "Step 1: Upper Body" : "Step 2: Lower Body"}
+              </div>
+            </div>
+            
+            <div className="absolute inset-0 pointer-events-none border-4 border-dashed border-primary/20 m-6 rounded-2xl" />
+            
+            <div className="absolute bottom-4 left-0 right-0 z-10 flex flex-col items-center gap-3">
+               <p className="bg-black/80 px-3 py-1 rounded text-white text-xs font-semibold max-w-[80%] text-center">
+                 {scanMessage}
+               </p>
+               {cameraState === "shirt" ? (
+                 <Button onClick={handleCaptureShirt} size="lg" className="w-[80%] shadow-xl shadow-primary/20">
+                   Capture Shirt Size
+                 </Button>
+               ) : (
+                 <Button onClick={handleCapturePants} size="lg" className="w-[80%] shadow-xl shadow-primary/20 bg-green-600 hover:bg-green-700">
+                   Capture Pants Size
+                 </Button>
+               )}
+            </div>
           </>
         )}
       </div>
+
+      {cameraState === "shirt" || cameraState === "pants" ? (
+        <Button variant="ghost" onClick={reset} className="w-full text-muted-foreground">
+          Cancel Scan
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -285,19 +373,19 @@ function MeasurementGrid({ measurements }: { measurements: ArMeasurements }) {
     <div className="grid grid-cols-2 gap-3 text-left bg-muted/30 p-4 rounded-lg border">
       <div className="space-y-0.5">
         <p className="text-xs text-muted-foreground">Chest</p>
-        <p className="font-semibold">{measurements.chest}"</p>
+        <p className="font-semibold">{measurements.chest ? `${measurements.chest}"` : "--"}</p>
       </div>
       <div className="space-y-0.5">
         <p className="text-xs text-muted-foreground">Waist</p>
-        <p className="font-semibold">{measurements.waist}"</p>
+        <p className="font-semibold">{measurements.waist ? `${measurements.waist}"` : "--"}</p>
       </div>
       <div className="space-y-0.5">
         <p className="text-xs text-muted-foreground">Hips</p>
-        <p className="font-semibold">{measurements.hips}"</p>
+        <p className="font-semibold">{measurements.hips ? `${measurements.hips}"` : "--"}</p>
       </div>
       <div className="space-y-0.5">
         <p className="text-xs text-muted-foreground">Inseam</p>
-        <p className="font-semibold">{measurements.inseam}"</p>
+        <p className="font-semibold">{measurements.inseam ? `${measurements.inseam}"` : "--"}</p>
       </div>
     </div>
   );

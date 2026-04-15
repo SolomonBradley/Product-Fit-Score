@@ -1,4 +1,11 @@
-export interface ProductIntelligence {
+import { isOllamaAvailable, generateJSON, OLLAMA_MODEL } from "./ollamaClient";
+import { logger } from "./logger";
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+puppeteer.use(StealthPlugin());
+
+export interface MasterIntelligence {
   productName: string;
   category: string;
   brand: string;
@@ -6,535 +13,349 @@ export interface ProductIntelligence {
   currency?: string;
   strengths: string[];
   weaknesses: string[];
-  featureScores: {
-    camera: number | null;
-    battery: number | null;
-    performance: number | null;
-    value: number | null;
-    design: number | null;
-    durability: number | null;
-  };
   riskFactors: string[];
-  keywords: string[];
+  featureScores: {
+    camera: number | null; battery: number | null; performance: number | null; value: number | null; design: number | null; durability: number | null;
+  };
+  fitScore: number;
+  riskLevel: "Low" | "Medium" | "High";
+  whyItFitsYou: string[];
+  whyItMayNot: string[];
+  intelligenceSource: "LLM" | "Procedural";
 }
 
-interface UserContext {
+export interface UserContext {
   interests: string[];
   emailCategories: string[];
-  emailBrands: string[];
+  emailBrands: Array<{ name: string; count: number; source: string }>;
   gender: string;
-  previousCategories?: string[];
+  recentOrders: Array<{ product: string; source: string; count: number }>;
 }
 
-// ─── HTML Fetcher ────────────────────────────────────────────────────────────
-
-async function fetchProductPage(url: string): Promise<string> {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Cache-Control": "no-cache",
-    },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.text();
-}
-
-function extractText(html: string, pattern: RegExp): string | null {
-  const match = html.match(pattern);
-  return match ? decodeHtmlEntities(match[1].trim()) : null;
-}
-
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
-    .replace(/<[^>]+>/g, "")
-    .trim();
-}
-
-function extractProductNameFromHtml(html: string, url: string): string {
-  // 1. OG title
-  const og = extractText(html, /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']{3,200})["']/i)
-    ?? extractText(html, /<meta[^>]+content=["']([^"']{3,200})["'][^>]+property=["']og:title["']/i);
-  if (og && og.length > 10 && !og.toLowerCase().includes("amazon.com")) return og;
-
-  // 2. Twitter title
-  const tw = extractText(html, /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']{3,200})["']/i);
-  if (tw && tw.length > 10) return tw;
-
-  // 3. <title> tag
-  const title = extractText(html, /<title[^>]*>([^<]{3,300})<\/title>/i);
-  if (title) {
-    // Strip site names like "Amazon.in:", "| Amazon", etc.
-    return title
-      .replace(/\s*[|\-–]\s*(Amazon[\w\s.]*|Zara|H&M|Myntra|Flipkart|BestBuy|Walmart|Target|ASOS).*$/i, "")
-      .replace(/^(Amazon|Myntra|Flipkart)[^:]*:\s*/i, "")
-      .trim();
-  }
-
-  // 4. H1
-  const h1 = extractText(html, /<h1[^>]*>([^<]{3,200})<\/h1>/i);
-  if (h1 && h1.length > 5) return h1;
-
-  // 5. Slug fallback
-  return extractNameFromUrl(url);
-}
-
-function extractNameFromUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const pathname = parsed.pathname;
-    const parts = pathname.split("/").filter(Boolean);
-
-    // Amazon: /ProductSlug/dp/ASIN or /dp/ASIN
-    if (parsed.hostname.includes("amazon")) {
-      const dpIdx = parts.indexOf("dp");
-      if (dpIdx > 0) {
-        // Slug is the part before "dp"
-        const slug = parts[dpIdx - 1];
-        if (slug && !/^[A-Z0-9]{8,12}$/.test(slug)) {
-          return slug
-            .replace(/[-_]/g, " ")
-            .replace(/\b\w/g, (c) => c.toUpperCase())
-            .slice(0, 100);
-        }
-      }
-      // Also check query string or other parts
-      const slugPart = parts.find((p) => p.length > 6 && !/^[A-Z0-9]{8,12}$/.test(p) && p !== "dp" && p !== "gp" && p !== "product");
-      if (slugPart) {
-        return slugPart
-          .replace(/[-_]/g, " ")
-          .replace(/\b\w/g, (c) => c.toUpperCase())
-          .slice(0, 100);
-      }
-    }
-
-    // Myntra/Flipkart/Nykaa: last meaningful path segment
-    if (parsed.hostname.includes("myntra") || parsed.hostname.includes("flipkart") || parsed.hostname.includes("nykaa")) {
-      // Usually /brand/product-name/buy/...
-      const productPart = parts.find((p) => p.length > 8 && !/^\d+$/.test(p) && !["buy", "product", "store"].includes(p));
-      if (productPart) {
-        return productPart
-          .replace(/[-_]/g, " ")
-          .replace(/\b\w/g, (c) => c.toUpperCase())
-          .slice(0, 100);
-      }
-    }
-
-    // Generic: last non-numeric path segment
-    const slug = [...parts].reverse().find((p) => p.length > 3 && !/^\d+$/.test(p) && !/^[A-Z0-9]{8,12}$/.test(p)) ?? parts[parts.length - 1] ?? "";
-    return slug
-      .replace(/[-_]/g, " ")
-      .replace(/\b\w/g, (c) => c.toUpperCase())
-      .replace(/\.(html?|php|aspx?)$/i, "")
-      .slice(0, 100)
-      || "Unknown Product";
-  } catch {
-    return "Unknown Product";
-  }
-}
-
-function extractBrandFromHtml(html: string, url: string): string | null {
-  // OG site name
-  const og = extractText(html, /<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']{2,60})["']/i)
-    ?? extractText(html, /<meta[^>]+content=["']([^"']{2,60})["'][^>]+property=["']og:site_name["']/i);
-  if (og && !["amazon", "flipkart", "myntra"].includes(og.toLowerCase())) return og;
-
-  // Schema.org brand
-  const schema = extractText(html, /"brand"\s*:\s*\{\s*"@type"\s*:\s*"Brand"\s*,\s*"name"\s*:\s*"([^"]{1,60})"/i)
-    ?? extractText(html, /"brand"\s*:\s*"([^"]{1,60})"/i);
-  if (schema) return schema;
-
-  // Itemprop brand
-  const itemprop = extractText(html, /itemprop=["']brand["'][^>]*>([^<]{1,60})</i)
-    ?? extractText(html, /<span[^>]*class=["'][^"']*brand[^"']*["'][^>]*>([^<]{1,60})</i);
-  if (itemprop) return itemprop;
-
-  // Try domain
-  try {
-    const host = new URL(url).hostname.replace(/^www\./, "");
-    const domain = host.split(".")[0];
-    if (!["amazon", "flipkart", "myntra", "snapdeal", "meesho", "ajio", "nykaa"].includes(domain)) {
-      return domain.charAt(0).toUpperCase() + domain.slice(1);
-    }
-  } catch { /* ignore */ }
-
-  return null;
-}
-
-function extractPriceFromHtml(html: string): { price: number | null; currency: string } {
-  // OG price
-  const ogPrice = extractText(html, /<meta[^>]+property=["']product:price:amount["'][^>]+content=["']([^"']+)["']/i);
-  const ogCurrency = extractText(html, /<meta[^>]+property=["']product:price:currency["'][^>]+content=["']([^"']+)["']/i);
-  if (ogPrice) return { price: parseFloat(ogPrice.replace(/[^0-9.]/g, "")), currency: ogCurrency ?? "USD" };
-
-  // Schema.org
-  const schemaPrice = extractText(html, /"price"\s*:\s*"?([0-9,]+\.?[0-9]*)"?/i);
-  const schemaCurrency = extractText(html, /"priceCurrency"\s*:\s*"([A-Z]{3})"/i);
-  if (schemaPrice) return { price: parseFloat(schemaPrice.replace(/[^0-9.]/g, "")), currency: schemaCurrency ?? "USD" };
-
-  return { price: null, currency: "USD" };
-}
-
-// ─── Category Detection ──────────────────────────────────────────────────────
-
-interface CategoryProfile {
-  name: string;
-  keywords: string[];
-  productKeywords: string[];
-  strengths: string[];
-  weaknesses: string[];
-  riskFactors: string[];
-  featureScores: ProductIntelligence["featureScores"];
-  fitKeywords: string[];
-}
-
-const CATEGORIES: CategoryProfile[] = [
-  {
-    name: "Apparel",
-    keywords: ["shirt", "kurta", "kurti", "blouse", "top", "dress", "skirt", "saree", "lehenga", "suit", "salwar", "kameez", "trouser", "pant", "jeans", "shorts", "jacket", "coat", "sweater", "hoodie", "sweatshirt", "clothing", "apparel", "wear", "fashion", "ethnic", "western", "tunic", "palazzo", "dupatta", "churidar", "anarkali", "maxi", "midi", "mini", "cardigan", "blouse", "bodice", "cami", "tank", "tee", "polo"],
-    productKeywords: ["cotton", "fabric", "material", "size", "xl", "xxl", "xs", "small", "medium", "large", "fit", "sleeve", "neck", "round", "v-neck", "halter", "backless", "printed", "pattern", "floral", "striped", "solid", "casual", "formal", "ethnic", "party", "festive"],
-    strengths: ["Breathable natural fabric", "Versatile styling options", "Comfortable everyday wear", "Unique ethnic design"],
-    weaknesses: ["May require special care", "Sizing can vary by brand", "Colors may fade after multiple washes"],
-    riskFactors: ["Check size chart carefully before ordering", "Hand-wash recommended for longevity", "Knot/tie details may loosen over time"],
-    featureScores: { camera: null, battery: null, performance: null, value: 8, design: 8, durability: 7 },
-    fitKeywords: ["fashion", "style", "clothing", "ethnic", "casual", "travel", "fitness", "art"],
-  },
-  {
-    name: "Footwear",
-    keywords: ["shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "sandal", "sandals", "slipper", "loafer", "heel", "heels", "flat", "moccasin", "oxford", "derby", "wedge", "pump", "stiletto", "flip-flop", "chappal", "jutti", "mojari"],
-    productKeywords: ["sole", "insole", "leather", "suede", "rubber", "grip", "cushion", "ankle", "lace"],
-    strengths: ["Comfortable insole cushioning", "Durable rubber sole", "Trendy design", "Wide size range"],
-    weaknesses: ["May require break-in period", "Sole can wear with heavy use", "Limited breathability"],
-    riskFactors: ["Size up if between sizes", "Check return policy — shoes are often non-returnable", "Outdoor wear may scuff quickly"],
-    featureScores: { camera: null, battery: null, performance: 7, value: 7, design: 8, durability: 7 },
-    fitKeywords: ["fashion", "sneakers", "fitness", "running", "travel", "streetwear"],
-  },
-  {
-    name: "Smartphones",
-    keywords: ["iphone", "galaxy", "pixel", "smartphone", "mobile", "phone", "oneplus", "xiaomi", "redmi", "poco", "realme", "oppo", "vivo", "motorola", "nothing phone", "5g phone", "android"],
-    productKeywords: ["ram", "storage", "battery", "mah", "camera", "mp", "display", "amoled", "processor", "chip", "5g", "nfc"],
-    strengths: ["High-resolution camera", "Fast processor", "Long battery life", "Premium build quality"],
-    weaknesses: ["High price for premium models", "Battery may degrade over 2 years", "Fragile glass back"],
-    riskFactors: ["Drop damage not covered under warranty", "Software updates end after 3-4 years", "Battery capacity decreases over time"],
-    featureScores: { camera: 8, battery: 7, performance: 8, value: 7, design: 8, durability: 7 },
-    fitKeywords: ["tech", "gadgets", "photography", "gaming", "content creation"],
-  },
-  {
-    name: "Laptops",
-    keywords: ["laptop", "notebook", "macbook", "chromebook", "ultrabook", "thinkpad", "inspiron", "xps", "ideapad", "aspire", "gaming laptop", "workstation"],
-    productKeywords: ["ram", "ssd", "processor", "intel", "amd", "nvidia", "display", "inch", "ghz", "cores", "battery life"],
-    strengths: ["Powerful multi-core processor", "Fast SSD storage", "High-resolution display", "Portable form factor"],
-    weaknesses: ["Expensive for premium configs", "Battery life varies under load", "Not upgradeable on thin models"],
-    riskFactors: ["Fan noise under sustained load", "Thermal throttling on thin chassis", "Repair costs high outside warranty"],
-    featureScores: { camera: null, battery: 8, performance: 9, value: 6, design: 8, durability: 8 },
-    fitKeywords: ["tech", "coding", "design", "content creation", "gaming", "work"],
-  },
-  {
-    name: "Audio",
-    keywords: ["headphone", "earphone", "earbuds", "airpods", "speaker", "soundbar", "tws", "wireless earbuds", "neckband", "noise cancelling", "noise-cancelling", "audiophile", "wired earphones"],
-    productKeywords: ["bass", "sound", "audio", "bluetooth", "anc", "microphone", "frequency", "impedance", "driver"],
-    strengths: ["Clear audio reproduction", "Effective noise isolation", "Comfortable for extended wear", "Good microphone quality"],
-    weaknesses: ["Battery dependent for wireless", "May feel tight after long sessions", "Call quality can vary"],
-    riskFactors: ["Ear tips can degrade over 1-2 years", "Firmware updates may change sound signature", "Connectivity issues in crowded spaces"],
-    featureScores: { camera: null, battery: 8, performance: 8, value: 7, design: 8, durability: 7 },
-    fitKeywords: ["music", "gaming", "content creation", "travel", "coding"],
-  },
-  {
-    name: "Skincare & Beauty",
-    keywords: ["moisturizer", "serum", "cleanser", "toner", "sunscreen", "spf", "retinol", "vitamin c", "niacinamide", "hyaluronic", "face wash", "lip balm", "eye cream", "foundation", "lipstick", "mascara", "blush", "concealer", "primer", "highlighter", "skincare", "makeup", "cosmetics", "perfume", "fragrance", "deodorant"],
-    productKeywords: ["skin", "pore", "brightening", "hydrating", "anti-aging", "acne", "glow", "ml", "oz", "formula", "dermatologist"],
-    strengths: ["Dermatologist-tested formula", "Effective active ingredients", "Suitable for daily use", "Visible results within weeks"],
-    weaknesses: ["Results vary by skin type", "May cause initial purging", "Fragrance can irritate sensitive skin"],
-    riskFactors: ["Patch test before full application", "May not work for all skin tones", "Sun sensitivity with retinol/AHA products"],
-    featureScores: { camera: null, battery: null, performance: 8, value: 8, design: 7, durability: 8 },
-    fitKeywords: ["skincare", "beauty", "wellness", "health", "self-care"],
-  },
-  {
-    name: "Fitness & Sports",
-    keywords: ["dumbbell", "barbell", "treadmill", "yoga mat", "resistance band", "protein", "supplement", "gym", "fitness", "workout", "exercise", "cycle", "bicycle", "running shoes", "sports", "cricket", "football", "badminton", "tennis", "squash", "swimming"],
-    productKeywords: ["reps", "sets", "kg", "lbs", "cardio", "strength", "endurance", "stretch"],
-    strengths: ["Supports active lifestyle goals", "Durable construction", "Good grip/traction", "Effective for target muscle groups"],
-    weaknesses: ["May need assembly", "Takes time to see results", "Can be bulky to store"],
-    riskFactors: ["Risk of injury without proper form", "Requires regular maintenance", "Check weight capacity before purchase"],
-    featureScores: { camera: null, battery: null, performance: 8, value: 7, design: 7, durability: 8 },
-    fitKeywords: ["fitness", "gym", "running", "yoga", "sports", "health", "wellness"],
-  },
-  {
-    name: "Home & Decor",
-    keywords: ["sofa", "couch", "table", "chair", "bed", "mattress", "pillow", "curtain", "lamp", "decor", "vase", "rug", "carpet", "shelf", "wardrobe", "cabinet", "drawer", "kitchen", "cookware", "utensil", "pot", "pan", "blender", "mixer", "appliance", "home", "furniture"],
-    productKeywords: ["wood", "steel", "plastic", "dimensions", "cm", "inch", "color", "assembly"],
-    strengths: ["Sturdy construction", "Aesthetic design", "Easy to assemble", "Space-efficient"],
-    weaknesses: ["Assembly required", "May look different in person", "Limited color options"],
-    riskFactors: ["Verify dimensions before ordering", "Delivery damage possible for large items", "Returns can be difficult"],
-    featureScores: { camera: null, battery: null, performance: 7, value: 7, design: 8, durability: 7 },
-    fitKeywords: ["home decor", "minimalism", "design", "cooking", "diy"],
-  },
-  {
-    name: "Books & Media",
-    keywords: ["book", "novel", "textbook", "ebook", "kindle", "paperback", "hardcover", "magazine", "comic", "manga"],
-    productKeywords: ["author", "pages", "edition", "isbn", "publisher", "fiction", "non-fiction"],
-    strengths: ["Expand knowledge and perspective", "Great value for time invested", "Portable entertainment"],
-    weaknesses: ["Static content, no interactivity", "Physical books can be heavy"],
-    riskFactors: ["Verify edition is current if technical topic", "Check language availability"],
-    featureScores: { camera: null, battery: null, performance: 9, value: 9, design: 7, durability: 7 },
-    fitKeywords: ["reading", "learning", "design", "coding", "art"],
-  },
-  {
-    name: "Cameras & Photography",
-    keywords: ["camera", "dslr", "mirrorless", "lens", "tripod", "gopro", "action camera", "webcam", "ring light", "studio light", "photography"],
-    productKeywords: ["megapixel", "mp", "sensor", "aperture", "iso", "shutter", "4k", "fps", "zoom"],
-    strengths: ["High-resolution image capture", "Versatile shooting modes", "Good low-light performance", "Durable build"],
-    weaknesses: ["Heavy/bulky body", "Complex settings for beginners", "Expensive lens ecosystem"],
-    riskFactors: ["Sensor dust on interchangeable lens cameras", "Memory cards add to cost", "Check warranty terms"],
-    featureScores: { camera: 9, battery: 6, performance: 8, value: 7, design: 8, durability: 8 },
-    fitKeywords: ["photography", "vlogging", "travel", "content creation", "art"],
-  },
-  {
-    name: "Gaming",
-    keywords: ["gaming", "game", "console", "playstation", "xbox", "nintendo", "switch", "controller", "joystick", "gaming headset", "mechanical keyboard", "gaming mouse", "gaming chair", "gpu", "graphics card"],
-    productKeywords: ["fps", "hz", "refresh rate", "rgb", "dpi", "latency", "ms", "wireless"],
-    strengths: ["Immersive gaming experience", "Low latency input", "Durable for heavy use", "Ergonomic design"],
-    weaknesses: ["Premium price for high-end gear", "May require software setup", "RGB lighting drains battery on wireless"],
-    riskFactors: ["Driver compatibility issues possible", "Check PC specs compatibility", "Warranty claims can be slow"],
-    featureScores: { camera: null, battery: 7, performance: 9, value: 7, design: 8, durability: 8 },
-    fitKeywords: ["gaming", "tech", "gadgets", "content creation"],
-  },
+// All known product category keywords — used to detect cross-category interest bleed
+const ALL_KNOWN_CATEGORIES = [
+  "apparel", "clothing", "fashion", "footwear", "shoes",
+  "electronics", "smartphone", "laptop", "audio", "camera", "gaming",
+  "beauty", "skincare", "cosmetics", "makeup",
+  "home", "kitchen", "decor", "furniture",
+  "bag", "luggage", "handbag",
+  "sports", "fitness", "outdoor",
+  "food", "grocery", "travel",
 ];
 
-const DEFAULT_CATEGORY: CategoryProfile = {
-  name: "General",
-  keywords: [],
-  productKeywords: [],
-  strengths: ["Meets standard quality expectations", "Practical everyday utility", "Good value for price"],
-  weaknesses: ["Limited reviews available", "Brand credibility unclear"],
-  riskFactors: ["Verify seller reputation before buying", "Check return policy", "Compare with alternatives"],
-  featureScores: { camera: null, battery: null, performance: 7, value: 7, design: 7, durability: 7 },
-  fitKeywords: [],
-};
+function getFilteredContext(user: UserContext, productCategory: string) {
+  const cat = productCategory.toLowerCase();
 
-function detectCategory(productName: string, pageText: string): CategoryProfile {
-  const combined = (productName + " " + pageText).toLowerCase();
+  const filteredInterests = user.interests.filter(i => {
+    const iLower = i.toLowerCase();
 
-  let bestMatch: CategoryProfile | null = null;
-  let bestScore = 0;
+    // Case 1: Interest has "for <Category>" suffix — only keep if it matches this product's category
+    const forMatch = i.match(/for ([^,.]+)$/i);
+    if (forMatch) {
+      const targetCat = forMatch[1].trim().toLowerCase();
+      return cat.includes(targetCat) || targetCat.includes(cat.split(" ")[0]);
+    }
 
-  for (const cat of CATEGORIES) {
-    let score = 0;
-    for (const kw of cat.keywords) {
-      if (combined.includes(kw.toLowerCase())) score += 2;
+    // Case 2: Interest contains ANY other known category keyword not related to this product
+    // e.g. "values quality apparel" should NOT appear in a Bag analysis
+    const containsOtherCategory = ALL_KNOWN_CATEGORIES.some(kw => {
+      if (cat.includes(kw)) return false; // it's THIS category, keep it
+      return iLower.includes(kw);
+    });
+    if (containsOtherCategory) return false;
+
+    return true; // genuinely general interest, keep it
+  });
+
+  // Build the list of excluded category names so we can FORBID them in the prompt
+  const excludedCategories = Array.from(new Set(
+    user.interests
+      .filter(i => !filteredInterests.includes(i))
+      .flatMap(i => {
+        const fm = i.match(/for ([^,.]+)$/i);
+        if (fm) return [fm[1].trim()];
+        // Extract whichever known category word triggered the exclusion
+        const iL = i.toLowerCase();
+        return ALL_KNOWN_CATEGORIES.filter(kw => !cat.includes(kw) && iL.includes(kw));
+      })
+  ));
+
+  const relevantOrders = user.recentOrders?.filter(o => {
+    const p = o.product.toLowerCase();
+    if ((cat.includes("bag") || cat.includes("luggage")) && (p.includes("bag") || p.includes("luggage") || p.includes("handbag") || p.includes("wallet"))) return true;
+    if (cat.includes("apparel") && (p.includes("shirt") || p.includes("dress") || p.includes("wear") || p.includes("kurta") || p.includes("jeans"))) return true;
+    if (cat.includes("electronic") && (p.includes("phone") || p.includes("laptop") || p.includes("earphone") || p.includes("watch"))) return true;
+    if (cat.includes("beauty") && (p.includes("lipstick") || p.includes("cream") || p.includes("face") || p.includes("serum") || p.includes("moisturizer"))) return true;
+    if (cat.includes("footwear") || cat.includes("shoe")) {
+      if (p.includes("shoe") || p.includes("sneaker") || p.includes("sandal") || p.includes("slipper")) return true;
     }
-    for (const kw of cat.productKeywords) {
-      if (combined.includes(kw.toLowerCase())) score += 1;
-    }
-    if (score > bestScore) {
-      bestScore = score;
-      bestMatch = cat;
-    }
+    return cat === "general" || cat === "unknown category";
+  }) || [];
+
+  return { filteredInterests, excludedCategories, relevantOrders };
+}
+
+// ─── Scraper & Pruning ───────────────────────────────────────────────────────
+
+function cleanPageContent(html: string): string {
+  // Capture Breadcrumbs for hard classification
+  const breadcrumbMatch = html.match(/<div[^>]*id="wayfinding-breadcrumbs_container"[^>]*>([\s\S]*?)<\/div>/i);
+  const breadcrumbs = breadcrumbMatch ? breadcrumbMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").split(/\s*[›>]\s*/).map(s => s.trim()).filter(Boolean).pop() || "General" : "Unknown Category";
+
+  const titleMatch = html.match(/<span[^>]*id="productTitle"[^>]*>([\s\S]*?)<\/span>/i) || 
+                     html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, "").trim() : "Unknown Product";
+
+  const priceMatch = html.match(/<span[^>]*class="a-price-whole"[^>]*>([\s\S]*?)<\/span>/i);
+  const price = priceMatch ? priceMatch[1].trim() : "Unknown Price";
+
+  // Semantic extraction of features and reviews
+  let body = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const mainText = body.slice(0, 4000); // Take first 4k chars for speed+relevance
+
+  const reviewMarker = "--- CUSTOMER REVIEW ---";
+  let reviews = "";
+  if (html.includes(reviewMarker)) {
+      reviews = html.split(reviewMarker).slice(1, 4).map(r => r.substring(0, 300).trim()).join("\n---\n");
   }
 
-  return bestMatch && bestScore >= 2 ? bestMatch : DEFAULT_CATEGORY;
+  return `CATEGORY: ${breadcrumbs}\nTITLE: ${title}\nPRICE: ${price}\nDETAILS: ${mainText}\nREVIEWS:\n${reviews}`;
 }
 
-// ─── Live Product Fetch ──────────────────────────────────────────────────────
-
-function looksLikeAsin(name: string): boolean {
-  return /^[A-Z0-9]{8,12}$/.test(name.trim());
-}
-
-async function buildProductIntelligenceFromWeb(url: string): Promise<ProductIntelligence> {
-  let html = "";
+async function fetchProductPage(url: string): Promise<string> {
+  let browser;
   try {
-    html = await fetchProductPage(url);
-  } catch {
-    html = "";
+    logger.info({ url }, "[Scraper] Launching Stealth Scraper...");
+    browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    const page = await browser.newPage();
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    
+    const reviewData = (await page.evaluate(`(() => {
+        const els = Array.from(document.querySelectorAll('.review-text-content, .a-expander-content.reviewText, .vdWf9X'));
+        return els.map(e => "--- CUSTOMER REVIEW ---\\n" + e.textContent.trim()).join("\\n");
+    })()`).catch(() => "")) as string;
+    
+    const html = await page.content();
+    return reviewData ? (reviewData + "\n" + html) : html;
+  } catch (err) {
+    logger.warn({ err }, "[Scraper] Puppeteer failed, falling back to fetch");
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    return res.text();
+  } finally {
+    if (browser) await browser.close();
   }
+}
 
-  let productName = extractNameFromUrl(url);
+// ─── The Intelligence Engine ──────────────────────────────────────────────────
 
-  if (html && html.length > 500) {
-    const htmlName = extractProductNameFromHtml(html, url);
-    // Prefer HTML name unless it looks like an ASIN or site name
-    if (
-      htmlName &&
-      htmlName.length > 8 &&
-      !looksLikeAsin(htmlName) &&
-      !htmlName.toLowerCase().includes("amazon.") &&
-      !htmlName.toLowerCase().includes("sign in") &&
-      !htmlName.toLowerCase().includes("captcha")
-    ) {
-      productName = htmlName;
-    }
-  }
+async function analyzeProduct(html: string, url: string, user: UserContext): Promise<MasterIntelligence | null> {
+  const cleaned = cleanPageContent(html);
+  
+  // ─── Category Isolation Phase ─────────────────────────────────────────────
+  const productCategory = cleaned.match(/CATEGORY: (.*)/)?.[1] || "General";
+  const { filteredInterests, excludedCategories, relevantOrders } = getFilteredContext(user, productCategory);
 
-  const brand = (html ? extractBrandFromHtml(html, url) : null) ?? extractBrandFromUrl(url);
-  const { price, currency } = html ? extractPriceFromHtml(html) : { price: null, currency: "USD" };
+  // ⚠️ HIGH RISK FIX #10: Strict category enum enforced in LLM prompt
+  // This may cause analysis to fail if product doesn't fit predefined categories.
+  // Monitor error rates and fallback behavior.
 
-  // Use a condensed version of the page text to avoid processing huge HTML
-  const pageText = html ? html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 5000) : "";
-  const cat = detectCategory(productName, pageText);
+  // Format orders as (Count, Product, Website) list for the LLM
+  const orderList = relevantOrders.map(o => `(${o.count}x, ${o.product}, ${o.source})`).join(", ") || "No relevant historical orders for this category";
 
-  // Adjust value score based on price
-  const featureScores = { ...cat.featureScores };
-  if (price) {
-    if (price < 500) featureScores.value = Math.min(10, (featureScores.value ?? 7) + 1);
-    else if (price > 5000) featureScores.value = Math.max(1, (featureScores.value ?? 7) - 2);
+  // ── BRAND FILTER: Only pass real retail/shopping brands to the LLM ──────────
+  // Excludes education, jobs, streaming, banking — only physical product stores matter.
+  const NON_RETAIL_KEYWORDS = [
+    "udemy","coursera","edx","skillshare","linkedin","udacity","pluralsight",
+    "simplilearn","greatlearning","upgrad","scaler","codecademy","datacamp",
+    "accenture","infosys","wipro","tcs","capgemini","cognizant","hcl",
+    "naukri","indeed","glassdoor","spotify","netflix","primevideo","hotstar",
+    "disney","hdfcbank","icicibank","sbicard","axisbank","phonepe","paytm",
+    "googlepay","razorpay","google","microsoft","varsha","unknown",
+  ];
+  const shoppingBrands = user.emailBrands?.filter(b => {
+    const lower = b.name.toLowerCase();
+    return !NON_RETAIL_KEYWORDS.some(kw => lower.includes(kw));
+  }) || [];
+
+  const brandList = shoppingBrands.length > 0
+    ? shoppingBrands.map(b => `${b.name} (${b.count} orders via ${b.source})`).join(", ")
+    : "No specific retail brand loyalty detected";
+
+  const prompt = `Role: High-Intelligence Skeptical Shopping Assistant (Strict Mode).
+Task: Determine if the product below is a genuine fit for this specific user or just a forced marketing match.
+
+[USER PROFILE (RELEVANT TO ${productCategory.toUpperCase()} ONLY)]
+- Key Interests: ${filteredInterests.join(", ")}
+- Documented Habits in this category (Count, Item, Store): ${orderList}
+- Preferred Brands & Loyalty: ${brandList}
+- Gender Profile: ${user.gender}
+
+[PRODUCT DATA] 
+${cleaned}
+
+${excludedCategories.length > 0 ? `[ZERO-TOLERANCE FORBIDDEN RULE]
+⛔ The user has preferences for OTHER product categories (${excludedCategories.join(", ")}). These are stored in SEPARATE buckets and are 100% IRRELEVANT to this analysis.
+This analysis is ONLY about: ${productCategory}. Do NOT reference, compare, or mention user habits from any other category.` : `[SCOPE]
+This analysis is ONLY about: ${productCategory}.`}
+
+[REASONING PROTOCOLS]
+1. SKEPTICAL ANALYSIS: Be a critic. Identify "marketing fluff" in the product description. If a bag claims "high durability" but is made of cotton, call it out.
+2. AUTHENTIC FIT: Do NOT use generic phrases like "stylish and spacious". Speak specifically about THIS product's actual features vs the user's documented habits.
+3. NO DEFAULT SCORES: Calculate Feature Scores from 0-10 based on raw evidence from the product page. Do NOT default to 7.
+4. NEVER EXPLICIT: NEVER use phrases like "your prioritization of" or "your documented habit of prioritizing". Speak naturally without referencing the user's meta-data.
+5. NO CONTRADICTION: Ensure "whyItFitsYou" and "whyItMayNot" do NOT contradict each other. Take a clear stance.
+6. HABITS VS INTERESTS: Documented Habits are 10x more important than Interests. Use habits to verify if they actually buy what they say they like.
+7. EVIDENCE-BASED MATCHING: Only match a User Interest if the product context directly supports it with specific evidence from the product page.
+8. DYNAMIC FEATURE EXTRACTION: In your JSON response, provide a "featureScores" object with 4-5 category-specific features (e.g., for a Bag: "Capacity", "Material", "Compartments", "Style").
+9. BULLET POINT FORMATTING: "whyItFitsYou" and "whyItMayNot" MUST be arrays of 2-3 concise, conversational bullet points.
+10. SIMPLE LANGUAGE: No jargon. Write like a smart friend giving honest advice, not a marketing bot.
+
+Return JSON ONLY:
+{
+  "productName": "",
+  "category": "Smartphones|Laptops|Electronics|Apparel|Footwear|Bags|Audio|Cameras|Gaming|Skincare|Home|Kitchen",
+  "brand": "",
+  "strengths": ["Evidence-based strength"],
+  "weaknesses": ["Evidence-based weakness"],
+  "featureScores": { 
+    "value": 0-10, 
+    "design": 0-10, 
+    "durability": 0-10,
+    "[Specific simple feature 1, e.g. comfort, space, battery, ingredients]": 0-10,
+    "[Specific simple feature 2, e.g. fit, performance, weight, texture]": 0-10
+  },
+  "fitScore": 0-100 (calculate mathematically),
+  "whyItFitsYou": ["Complex analysis of how it matches their HABITS, not just interests"],
+  "whyItMayNot": ["Skeptical observation about potential mismatch with their buying patterns"]
+}`;
+
+  logger.info({ model: OLLAMA_MODEL }, "[Engine] Initiating LLM Analysis Mode (Strict Skeptical Logic)...");
+  return await generateJSON<MasterIntelligence>(prompt);
+}
+
+export async function recalculateFitScoreForUser(
+  base: MasterIntelligence, 
+  user: UserContext, 
+  boost: string, 
+  prev: { fitScore: number, whyItFitsYou: string[], whyItMayNot: string[] }
+): Promise<Partial<MasterIntelligence> | null> {
+  const { filteredInterests } = getFilteredContext(user, base.category);
+  const prompt = `Task: Update the fit analysis by prioritizing: "${boost}".
+Current Profile: ${filteredInterests.join(", ")}
+Previous Verdict: ${prev.fitScore} Fit Score.
+Previous Feature Scores: ${JSON.stringify(base.featureScores)}
+Product Context: [${base.productName} in ${base.category}].
+
+RULES:
+1. WEIGHTAGE: The updated Fit Score must be a split of 60% weight on the "${boost}" performance and 40% weight on the previous comprehensive analysis.
+2. If the user wants to prioritize "Value" and reviews say it's expensive, the score MUST go down significantly (due to the 60% weight).
+3. If they prioritize "Value" and it's cheap/good deals, the score MUST go up.
+4. Keep the reasoning conversational and skeptical.
+5. NEVER explicitly mention the user's priority (e.g. don't say "Because you prioritize design..."). Be natural.
+6. CATEGORY ISOLATION: Ignore interests from completely unrelated categories.
+7. ALL features from the previous analysis must be returned in "featureScores", adjusted based on the new ${boost} priority.
+
+Return JSON ONLY:
+{
+  "fitScore": 0-100 (weighted 60/40 between boosted feature and previous score),
+  "featureScores": { /* return ALL previous keys with their new scores */ },
+  "whyItFitsYou": ["New updated reason"],
+  "whyItMayNot": ["New skeptical observation"]
+}`;
+
+  return await generateJSON<Partial<MasterIntelligence>>(prompt);
+}
+
+// ─── Small Brain (Procedural Fallback) ───────────────────────────────────────
+
+function getProceduralAnalysis(cleaned: string, user: UserContext): MasterIntelligence {
+  const title = cleaned.match(/TITLE: (.*)/)?.[1]?.toLowerCase() || "";
+  const category = cleaned.match(/CATEGORY: (.*)/)?.[1]?.toLowerCase() || "general";
+  const { filteredInterests, relevantOrders } = getFilteredContext(user, category);
+  
+  let fitScore = 60; // Neutral baseline
+  let whyItFitsYou = ["Evaluated based on utility and general profile."];
+
+  // Weighted Keyword Scoring
+  const scores = {
+    brandMatch: user.emailBrands.some(b => title.includes(b.name.toLowerCase())) ? 20 : 0,
+    productMatch: relevantOrders.some(o => title.includes(o.product.toLowerCase())) ? 25 : 0,
+    interestMatch: filteredInterests.some(i => title.includes(i.toLowerCase())) ? 15 : 0
+  };
+
+  fitScore += (scores.brandMatch + scores.productMatch + scores.interestMatch);
+  fitScore = Math.min(fitScore, 95);
+
+  if (scores.brandMatch && scores.productMatch) {
+    whyItFitsYou = ["Direct Match: You frequently buy this brand and product type."];
+  } else if (scores.productMatch) {
+    whyItFitsYou = ["System Match: You have a documented history of buying this type of product."];
   }
 
   return {
-    productName,
-    category: cat.name,
-    brand,
-    price,
-    currency,
-    strengths: cat.strengths,
-    weaknesses: cat.weaknesses,
-    riskFactors: cat.riskFactors,
-    featureScores,
-    keywords: cat.fitKeywords,
+    productName: title || "Product",
+    category,
+    brand: "Detected",
+    strengths: ["Historical relevance check"],
+    weaknesses: ["Algorithmic fallback active"],
+    riskFactors: [],
+    riskLevel: "Medium",
+    featureScores: { value: 6, design: 6, durability: 6, camera: null, battery: null, performance: null },
+    fitScore,
+    whyItFitsYou,
+    whyItMayNot: ["Detailed reasoning offline."],
+    intelligenceSource: "Procedural"
   };
-}
-
-function extractBrandFromUrl(url: string): string {
-  try {
-    const host = new URL(url).hostname.replace(/^www\./, "");
-    const domain = host.split(".")[0];
-    const retailers = ["amazon", "flipkart", "myntra", "snapdeal", "meesho", "ajio", "nykaa", "bestbuy", "walmart", "target", "zara", "hm", "asos"];
-    if (!retailers.includes(domain)) {
-      return domain.charAt(0).toUpperCase() + domain.slice(1);
-    }
-  } catch { /* ignore */ }
-  return "Unknown";
-}
-
-// ─── Score Engine ────────────────────────────────────────────────────────────
-
-function computeFitScore(
-  product: ProductIntelligence,
-  user: UserContext,
-  boostedFeatures: string[] = []
-): { fitScore: number; whyItFitsYou: string[]; whyItMayNot: string[]; riskLevel: string } {
-  let score = 50;
-  const whyItFitsYou: string[] = [];
-  const whyItMayNot: string[] = [];
-
-  // 1. Interest match
-  const userInterestsLower = user.interests.map((i) => i.toLowerCase());
-  const productKeywordsLower = product.keywords.map((k) => k.toLowerCase());
-  const interestMatches = productKeywordsLower.filter((k) =>
-    userInterestsLower.some((i) => i.includes(k) || k.includes(i))
-  );
-
-  if (interestMatches.length >= 3) {
-    score += 20;
-    whyItFitsYou.push(`Strongly aligns with your interests in ${interestMatches.slice(0, 2).join(" and ")}`);
-  } else if (interestMatches.length >= 1) {
-    score += 10;
-    whyItFitsYou.push(`Matches your interest in ${interestMatches[0]}`);
-  } else {
-    score -= 5;
-    whyItMayNot.push("Product doesn't closely match your stated interests");
-  }
-
-  // 2. Feature quality
-  const scores = Object.values(product.featureScores).filter((s): s is number => s !== null);
-  const avgFeatureScore = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 7;
-  score += (avgFeatureScore - 5) * 2;
-  if (avgFeatureScore >= 8) whyItFitsYou.push("Above-average quality across all measured dimensions");
-
-  // 3. Boost for selected features
-  for (const feat of boostedFeatures) {
-    const featKey = feat.toLowerCase() as keyof typeof product.featureScores;
-    const featScore = product.featureScores[featKey];
-    if (featScore !== null && featScore !== undefined) {
-      if (featScore >= 8) {
-        score += 8;
-        whyItFitsYou.push(`Excellent ${feat} score (${featScore}/10) — exactly what you prioritized`);
-      } else if (featScore >= 6) {
-        score += 3;
-        whyItFitsYou.push(`${feat} performance is solid (${featScore}/10)`);
-      } else {
-        score -= 5;
-        whyItMayNot.push(`${feat} is below your expectations (${featScore}/10)`);
-      }
-    }
-  }
-
-  // 4. Email purchase history match
-  if (user.emailCategories.length > 0) {
-    const catLower = product.category.toLowerCase();
-    if (user.emailCategories.some((c) => catLower.includes(c.toLowerCase()) || c.toLowerCase().includes(catLower.split(" ")[0]))) {
-      score += 7;
-      whyItFitsYou.push("You frequently purchase in this category — a familiar buy for you");
-    }
-  }
-  if (user.emailBrands.length > 0 && product.brand) {
-    if (user.emailBrands.some((b) => b.toLowerCase() === product.brand!.toLowerCase())) {
-      score += 5;
-      whyItFitsYou.push(`You've bought from ${product.brand} before — already a trusted brand for you`);
-    }
-  }
-
-  // 5. Risk penalty
-  score -= Math.min(product.riskFactors.length * 2, 10);
-  if (product.riskFactors.length > 2) {
-    whyItMayNot.push(`Notable risk: ${product.riskFactors[0].toLowerCase()}`);
-  }
-
-  // 6. Value check
-  if (product.weaknesses.some((w) => w.toLowerCase().includes("price") || w.toLowerCase().includes("expensive"))) {
-    score -= 3;
-    whyItMayNot.push("Premium-priced — consider whether value justifies cost for you");
-  }
-
-  if (whyItFitsYou.length === 0) whyItFitsYou.push("Product meets quality standards in its category");
-  if (whyItMayNot.length === 0) whyItMayNot.push("No major mismatches detected based on your profile");
-
-  score = Math.max(0, Math.min(100, Math.round(score)));
-  const riskLevel = product.riskFactors.length >= 3 ? "High" : product.riskFactors.length >= 2 ? "Medium" : "Low";
-
-  return { fitScore: score, whyItFitsYou, whyItMayNot, riskLevel };
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-export async function analyzeProductForUser(
-  url: string,
-  userContext: UserContext,
-  boostedFeatures: string[] = []
-) {
-  const product = await buildProductIntelligenceFromWeb(url);
-  const { fitScore, whyItFitsYou, whyItMayNot, riskLevel } = computeFitScore(product, userContext, boostedFeatures);
+export async function analyzeProductForUser(url: string, user: UserContext) {
+  const ollamaReady = await isOllamaAvailable();
+  const html = await fetchProductPage(url);
+  const cleaned = cleanPageContent(html);
+  
+  let result = await analyzeProduct(html, url, user);
 
-  const boostableFeatures = Object.entries(product.featureScores)
-    .filter(([, v]) => v !== null)
-    .map(([k]) => k.charAt(0).toUpperCase() + k.slice(1));
+  if (!result) {
+    logger.warn("[Engine] Switching to Small Brain Procedural Fallback.");
+    result = getProceduralAnalysis(cleaned, user);
+  } else {
+    result.intelligenceSource = "LLM";
+  }
+
+  // ENFORCING BUCKET LIMIT: Max 2 boosts per category (case-insensitive category match).
+  const resultCategoryLower = (result?.category ?? "").toLowerCase().trim();
+  const prioritizedFeatures = user.interests
+    .filter(i => {
+      if (!i.startsWith("Prioritizes ")) return false;
+      const forMatch = i.match(/for (.+)$/i);
+      if (!forMatch) return false;
+      return forMatch[1].trim().toLowerCase() === resultCategoryLower;
+    })
+    .map(i => {
+      // Extract feature name: "Prioritizes Water Resistance for Bags & Luggage" → "Water Resistance"
+      const match = i.match(/^Prioritizes (.+?) for /i);
+      return match ? match[1].trim() : "";
+    })
+    .filter(Boolean);
+
+  let boostableFeatures: string[] = [];
+  if (prioritizedFeatures.length < 2) {
+    const allFeatures = Object.entries(result.featureScores || {})
+      .filter(([_, score]) => score !== null && score !== undefined)
+      .map(([key]) => key.charAt(0).toUpperCase() + key.slice(1));
+    // Only show features not already boosted for THIS category
+    boostableFeatures = allFeatures.filter(f => !prioritizedFeatures.map(p => p.toLowerCase()).includes(f.toLowerCase()));
+  }
+  // If already at 2 boosts for this category, boostableFeatures stays empty — no more boosts allowed
 
   return {
-    productName: product.productName,
+    ...result,
     productUrl: url,
-    category: product.category,
-    brand: product.brand,
-    price: product.price,
-    currency: product.currency,
-    fitScore,
-    riskLevel,
-    strengths: product.strengths,
-    weaknesses: product.weaknesses,
-    riskFactors: product.riskFactors,
-    whyItFitsYou,
-    whyItMayNot,
-    featureScores: product.featureScores,
     boostableFeatures,
     analyzedAt: new Date().toISOString(),
+    llmPowered: ollamaReady
   };
 }

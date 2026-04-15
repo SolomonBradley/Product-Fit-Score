@@ -19,7 +19,17 @@ router.get("/profile", requireAuth, async (req, res): Promise<void> => {
     .where(eq(profilesTable.userId, user.id));
 
   if (!profile) {
-    res.status(404).json({ error: "Profile not found" });
+    res.json({
+      userId: user.id,
+      name: user.name || "",
+      gender: "prefer_not_to_say",
+      height: null,
+      weight: null,
+      apparel: { topSize: "M", bottomSize: "32" },
+      arMeasurements: { chest: null, waist: null, hips: null, inseam: null },
+      interests: [],
+      emailIntegration: { connected: false, categories: [], brands: [] },
+    });
     return;
   }
 
@@ -55,13 +65,15 @@ router.put("/profile", requireAuth, async (req, res): Promise<void> => {
     apparel: data.apparel as Record<string, unknown>,
     arMeasurements: data.arMeasurements as Record<string, unknown>,
     interests: data.interests as string[],
-    emailIntegration: data.emailIntegration as Record<string, unknown>,
     updatedAt: new Date(),
   };
 
   const [profile] = await db
     .insert(profilesTable)
-    .values(upsertData)
+    .values({
+      ...upsertData,
+      emailIntegration: { connected: false, categories: [], brands: [], recentOrders: [] },
+    })
     .onConflictDoUpdate({
       target: profilesTable.userId,
       set: {
@@ -72,8 +84,9 @@ router.put("/profile", requireAuth, async (req, res): Promise<void> => {
         apparel: upsertData.apparel,
         arMeasurements: upsertData.arMeasurements,
         interests: upsertData.interests,
-        emailIntegration: upsertData.emailIntegration,
         updatedAt: upsertData.updatedAt,
+        // 💀 CRITICAL FIX: Never touch emailIntegration here — it's only updated by Gmail callback
+        // Omit emailIntegration from the conflict update so existing value is preserved
       },
     })
     .returning();

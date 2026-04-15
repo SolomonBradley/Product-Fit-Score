@@ -1,4 +1,4 @@
-import { Switch, Route, Router as WouterRouter, Redirect } from "wouter";
+import { Switch, Route, Router as WouterRouter, Redirect, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -14,6 +14,7 @@ const queryClient = new QueryClient();
 
 function ProtectedRoute({ component: Component, requireOnboarding = true }: { component: any, requireOnboarding?: boolean }) {
   const { user, isLoading } = useAuth();
+  const [location] = useLocation();
 
   if (isLoading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
   if (!user) return <Redirect to="/login" />;
@@ -22,7 +23,7 @@ function ProtectedRoute({ component: Component, requireOnboarding = true }: { co
     return <Redirect to="/onboarding" />;
   }
   
-  if (!requireOnboarding && user.onboardingCompleted && window.location.pathname === "/onboarding") {
+  if (!requireOnboarding && user.onboardingCompleted && location === "/onboarding") {
     return <Redirect to="/dashboard" />;
   }
 
@@ -42,7 +43,7 @@ function AppRoutes() {
   return (
     <Switch>
       <Route path="/">
-        <Redirect to="/dashboard" />
+        <PublicRoute component={Login} />
       </Route>
       <Route path="/login">
         <PublicRoute component={Login} />

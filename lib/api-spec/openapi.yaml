@@ -391,6 +391,34 @@ components:
         - hips
         - inseam
 
+    BrandIntelligence:
+      type: object
+      properties:
+        name:
+          type: string
+        count:
+          type: number
+        source:
+          type: string
+      required:
+        - name
+        - count
+        - source
+
+    RecentOrder:
+      type: object
+      properties:
+        product:
+          type: string
+        source:
+          type: string
+        count:
+          type: number
+      required:
+        - product
+        - source
+        - count
+
     EmailIntegration:
       type: object
       properties:
@@ -403,11 +431,16 @@ components:
         brands:
           type: array
           items:
-            type: string
+            $ref: "#/components/schemas/BrandIntelligence"
+        recentOrders:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecentOrder"
       required:
         - connected
         - categories
         - brands
+        - recentOrders
 
     UserProfile:
       type: object
@@ -499,26 +532,9 @@ components:
 
     FeatureScores:
       type: object
-      properties:
-        camera:
-          type: ["number", "null"]
-        battery:
-          type: ["number", "null"]
-        performance:
-          type: ["number", "null"]
-        value:
-          type: ["number", "null"]
-        design:
-          type: ["number", "null"]
-        durability:
-          type: ["number", "null"]
-      required:
-        - camera
-        - battery
-        - performance
-        - value
-        - design
-        - durability
+      additionalProperties:
+        type: ["number", "null"]
+      description: "Dynamic feature scores, keys vary by product category (e.g., 'camera', 'comfort', 'value', 'design')"
 
     FitScoreResult:
       type: object
@@ -531,17 +547,11 @@ components:
           type: string
         fitScore:
           type: number
-        riskLevel:
-          type: string
         strengths:
           type: array
           items:
             type: string
         weaknesses:
-          type: array
-          items:
-            type: string
-        riskFactors:
           type: array
           items:
             type: string
@@ -566,10 +576,8 @@ components:
         - productUrl
         - category
         - fitScore
-        - riskLevel
         - strengths
         - weaknesses
-        - riskFactors
         - whyItFitsYou
         - whyItMayNot
         - featureScores
@@ -589,8 +597,6 @@ components:
           type: string
         fitScore:
           type: number
-        riskLevel:
-          type: string
         analyzedAt:
           type: string
       required:
@@ -599,7 +605,6 @@ components:
         - productUrl
         - category
         - fitScore
-        - riskLevel
         - analyzedAt
 
     HistoryStats:

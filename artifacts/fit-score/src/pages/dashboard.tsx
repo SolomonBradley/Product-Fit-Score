@@ -1,6 +1,6 @@
 import { Layout } from "@/components/layout";
 import { useAuth } from "@/hooks/use-auth";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useGetHistory, useGetHistoryStats, useAnalyzeProduct, getGetHistoryQueryKey, getGetHistoryStatsQueryKey } from "@workspace/api-client-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -8,30 +8,54 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FitScoreCard } from "@/components/fit-score-card";
-import { Search, Sparkles, Clock, ArrowUpRight, BarChart3, Activity } from "lucide-react";
+import { Search, Sparkles, Clock, ArrowUpRight, BarChart3, Activity, Mail, CheckCircle2, RefreshCw } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 
 export default function Dashboard() {
   const { user } = useAuth();
   const [url, setUrl] = useState("");
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [gmailStatus, setGmailStatus] = useState<{ connected: boolean; brands: any[] } | null>(null);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
   const { data: history, isLoading: historyLoading } = useGetHistory({
-    query: {
-      queryKey: getGetHistoryQueryKey()
-    }
+    query: { queryKey: getGetHistoryQueryKey() }
   });
 
   const { data: stats, isLoading: statsLoading } = useGetHistoryStats({
-    query: {
-      queryKey: getGetHistoryStatsQueryKey()
-    }
+    query: { queryKey: getGetHistoryStatsQueryKey() }
   });
+
+  // Fetch Gmail status directly (no generated hook for this endpoint)
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    fetch("/api/gmail/status", { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => setGmailStatus(data))
+      .catch(() => {});
+  }, []);
 
   const analyzeMutation = useAnalyzeProduct();
   const [currentResult, setCurrentResult] = useState<any>(null);
+
+  const handleGmailSync = async () => {
+    setIsSyncing(true);
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch("/api/gmail/auth-url", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error("Failed to get auth URL");
+      const { url: authUrl } = await res.json();
+      window.location.href = authUrl;
+    } catch (err: any) {
+      toast({ title: "Gmail sync failed", description: err.message, variant: "destructive" });
+      setIsSyncing(false);
+    }
+  };
 
   const handleAnalyze = (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,7 +81,7 @@ export default function Dashboard() {
   return (
     <Layout>
       <div className="container mx-auto px-4 py-8 max-w-5xl space-y-12">
-        
+
         {/* Header & Stats */}
         <section className="space-y-6">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4">
@@ -65,7 +89,7 @@ export default function Dashboard() {
               <h1 className="text-3xl font-bold tracking-tight">Welcome, {user?.name?.split(' ')[0] || 'User'}</h1>
               <p className="text-muted-foreground">Your personal shopping intelligence is ready.</p>
             </div>
-            
+
             <div className="flex gap-3 w-full md:w-auto overflow-x-auto pb-2 md:pb-0">
               <Card className="bg-muted/30 border-none shadow-none shrink-0 min-w-[120px]">
                 <CardContent className="p-3 space-y-1">
@@ -94,24 +118,24 @@ export default function Dashboard() {
             <div className="pl-4 pr-2 text-muted-foreground">
               <Search className="w-5 h-5" />
             </div>
-            <Input 
+            <Input
               value={url}
               onChange={e => setUrl(e.target.value)}
-              placeholder="Paste any product URL (Amazon, Zara, BestBuy...)" 
+              placeholder="Paste any product URL (Amazon, Zara, BestBuy...)"
               className="border-0 shadow-none focus-visible:ring-0 text-lg h-14 bg-transparent placeholder:text-muted-foreground/60"
             />
-            <Button 
-              type="submit" 
-              size="lg" 
+            <Button
+              type="submit"
+              size="lg"
               className="h-14 px-8 rounded-xl font-medium shadow-md transition-transform active:scale-95"
               disabled={analyzeMutation.isPending || !url.trim()}
             >
               {analyzeMutation.isPending ? (
                 <div className="flex items-center gap-2">
                   <span className="flex gap-1">
-                    <span className="w-1.5 h-1.5 bg-primary-foreground rounded-full animate-bounce" style={{animationDelay: "0ms"}} />
-                    <span className="w-1.5 h-1.5 bg-primary-foreground rounded-full animate-bounce" style={{animationDelay: "150ms"}} />
-                    <span className="w-1.5 h-1.5 bg-primary-foreground rounded-full animate-bounce" style={{animationDelay: "300ms"}} />
+                    <span className="w-1.5 h-1.5 bg-primary-foreground rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                    <span className="w-1.5 h-1.5 bg-primary-foreground rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                    <span className="w-1.5 h-1.5 bg-primary-foreground rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
                   </span>
                   <span className="ml-2">Analyzing...</span>
                 </div>
@@ -119,6 +143,29 @@ export default function Dashboard() {
                 <span className="flex items-center gap-2">
                   <Sparkles className="w-4 h-4" /> Analyze
                 </span>
+              )}
+            </Button>
+            <Button 
+              type="button" 
+              variant="outline" 
+              size="lg" 
+              className="h-14 px-6 gap-2 rounded-xl font-medium border-primary/20 hover:bg-primary/5 transition-all text-primary relative"
+              onClick={handleGmailSync}
+              disabled={isSyncing}
+              title={gmailStatus?.connected ? `Gmail connected · ${gmailStatus.brands?.length || 0} brands synced` : "Gmail not connected"}
+            >
+              {isSyncing ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : gmailStatus?.connected ? (
+                <CheckCircle2 className="w-4 h-4 text-green-500" />
+              ) : (
+                <Mail className="w-4 h-4" />
+              )}
+              <span className="hidden sm:inline">
+                {isSyncing ? "Connecting..." : gmailStatus?.connected ? "Re-sync Gmail" : "Sync Gmail"}
+              </span>
+              {gmailStatus?.connected && (
+                <span className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-green-500 rounded-full border-2 border-background" />
               )}
             </Button>
           </form>
@@ -138,21 +185,20 @@ export default function Dashboard() {
             <h2 className="text-lg font-semibold flex items-center gap-2 text-muted-foreground">
               <Clock className="w-5 h-5" /> Recent History
             </h2>
-            
+
             {historyLoading ? (
               <div className="space-y-3">
-                {[1,2,3].map(i => <Skeleton key={i} className="h-20 w-full rounded-xl" />)}
+                {[1, 2, 3].map(i => <Skeleton key={i} className="h-20 w-full rounded-xl" />)}
               </div>
             ) : history && history.length > 0 ? (
               <div className="grid gap-3">
                 {history.map((item: any) => (
                   <div key={item.id} className="group bg-card border rounded-xl p-4 flex items-center justify-between hover:border-primary/30 transition-colors cursor-pointer shadow-sm hover:shadow-md">
                     <div className="flex items-center gap-4">
-                      <div className={`w-12 h-12 rounded-full flex items-center justify-center font-bold font-mono text-lg border-2 ${
-                        item.fitScore >= 75 ? 'border-green-500/20 text-green-500 bg-green-500/5' : 
-                        item.fitScore >= 50 ? 'border-yellow-500/20 text-yellow-500 bg-yellow-500/5' : 
-                        'border-red-500/20 text-red-500 bg-red-500/5'
-                      }`}>
+                      <div className={`w-12 h-12 rounded-full flex items-center justify-center font-bold font-mono text-lg border-2 ${item.fitScore >= 75 ? 'border-green-500/20 text-green-500 bg-green-500/5' :
+                          item.fitScore >= 50 ? 'border-yellow-500/20 text-yellow-500 bg-yellow-500/5' :
+                            'border-red-500/20 text-red-500 bg-red-500/5'
+                        }`}>
                         {item.fitScore}
                       </div>
                       <div>

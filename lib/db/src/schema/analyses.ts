@@ -8,7 +8,6 @@ export const analysesTable = pgTable("analyses", {
   productUrl: text("product_url").notNull(),
   category: text("category").notNull(),
   fitScore: real("fit_score").notNull(),
-  riskLevel: text("risk_level").notNull(),
   result: jsonb("result").notNull(),
   analyzedAt: timestamp("analyzed_at").notNull().defaultNow(),
 });
