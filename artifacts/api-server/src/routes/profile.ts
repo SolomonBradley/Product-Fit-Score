@@ -28,7 +28,7 @@ router.get("/profile", requireAuth, async (req, res): Promise<void> => {
       apparel: { topSize: "M", bottomSize: "32" },
       arMeasurements: { chest: null, waist: null, hips: null, inseam: null },
       interests: [],
-      emailIntegration: { connected: false, categories: [], brands: [] },
+      emailIntegration: { connected: false, categories: [], brands: [], recentOrders: [] },
     });
     return;
   }

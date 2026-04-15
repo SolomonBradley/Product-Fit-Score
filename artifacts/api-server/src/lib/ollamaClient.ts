@@ -1,19 +1,21 @@
-import { Ollama } from "ollama";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { logger } from "./logger";
 
-const OLLAMA_BASE_URL = process.env["OLLAMA_BASE_URL"] ?? "http://localhost:11434";
-export const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "llama3";
+const apiKey = process.env["GOOGLE_GENAI_API_KEY"];
+if (!apiKey) {
+  throw new Error("GOOGLE_GENAI_API_KEY environment variable is required");
+}
 
-const client = new Ollama({ host: OLLAMA_BASE_URL });
+const genAI = new GoogleGenerativeAI(apiKey);
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 
 export async function isOllamaAvailable(): Promise<boolean> {
   try {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
-      signal: AbortSignal.timeout(10000), // Increase to 10s for health check
-    });
-    return res.ok;
+    // Test the API with a simple call
+    await model.generateContent("ping");
+    return true;
   } catch {
     return false;
   }
@@ -26,41 +28,61 @@ function extractJSON(text: string): string {
   if (mdMatch) return mdMatch[1].trim();
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start !== -1 && end !== -1 && end > start) return text.slice(start, end + 1);
+  if (start !== -1 && end !== -1 && end > start)
+    return text.slice(start, end + 1);
   return text.trim();
 }
 
 // ─── Core LLM Call ────────────────────────────────────────────────────────────
 
-export async function generateJSON<T>(prompt: string, retries = 1): Promise<T | null> {
+export async function generateJSON<T>(
+  prompt: string,
+  retries = 1,
+): Promise<T | null> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      // 💀 CRITICAL FIX: Wrap client.chat() with a timeout that actually cancels
-      const chatPromise = client.chat({
-        model: OLLAMA_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        format: "json",
-        options: { temperature: 0.1, num_predict: 2000 },
+      // Wrap the API call with a timeout
+      const contentPromise = model.generateContent({
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 2000,
+        },
       });
 
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("LLM request timeout (10 min)")), 600000)
+        setTimeout(
+          () => reject(new Error("LLM request timeout (10 min)")),
+          600000,
+        ),
       );
 
-      const response = await Promise.race([chatPromise, timeoutPromise]);
+      const response = await Promise.race([contentPromise, timeoutPromise]);
 
-      const raw = extractJSON(response.message.content.trim());
+      const raw = extractJSON(response.response.text().trim());
       return JSON.parse(raw) as T;
     } catch (err: any) {
       const isTimeout = err.message?.includes("timeout");
       if (attempt < retries && !isTimeout) {
-        logger.warn(`[LLM] Connection attempt ${attempt + 1} failed. Re-trying...`);
-        await new Promise(r => setTimeout(r, 1000)); // Short backoff
+        logger.warn(
+          `[LLM] Connection attempt ${attempt + 1} failed. Re-trying...`,
+        );
+        await new Promise((r) => setTimeout(r, 1000)); // Short backoff
         continue;
       }
-      
-      const errorMsg = isTimeout ? "Timeout (10 min)" : (err.message || String(err));
-      logger.error({ error: errorMsg }, "[LLM] Analysis permanently failed or timed out.");
+
+      const errorMsg = isTimeout
+        ? "Timeout (10 min)"
+        : err.message || String(err);
+      logger.error(
+        { error: errorMsg },
+        "[LLM] Analysis permanently failed or timed out.",
+      );
       return null;
     }
   }

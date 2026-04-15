@@ -114,7 +114,7 @@ export default function Onboarding() {
     apparel: { topSize: "M", bottomSize: "32" },
     arMeasurements: { chest: null, waist: null, hips: null, inseam: null },
     interests: [],
-    emailIntegration: { connected: false, categories: [], brands: [] }
+    emailIntegration: { connected: false, categories: [], brands: [], recentOrders: [] }
   });
 
   const [interestSearch, setInterestSearch] = useState("");

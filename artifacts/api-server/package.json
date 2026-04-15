@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@paralleldrive/cuid2": "^3.3.0",
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
@@ -17,7 +18,6 @@
     "cors": "^2",
     "drizzle-orm": "catalog:",
     "express": "^5",
-    "ollama": "^0.5.0",
     "pino": "^9",
     "pino-http": "^10",
     "puppeteer": "^24.40.0",
